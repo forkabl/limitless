@@ -31,23 +31,23 @@ constexpr char kExpectedChromiumRevision[] =
     "2b4613f0a24d234b139f1246028239a2f5dde58c";
 
 class LimitlessWebUIBrowserTest : public InProcessBrowserTest {
-public:
+ public:
   void SetUp() override {
     scoped_feature_list_.InitWithFeatures(
         {features::kWebium, surface_embed::features::kSurfaceEmbed}, {});
     InProcessBrowserTest::SetUp();
   }
 
-private:
+ private:
   base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
                        LoadsSemanticLimitlessResources) {
-  WebUIBrowserWindow *window = WebUIBrowserWindow::FromBrowser(browser());
+  WebUIBrowserWindow* window = WebUIBrowserWindow::FromBrowser(browser());
   ASSERT_TRUE(window);
 
-  content::WebContents *shell_contents =
+  content::WebContents* shell_contents =
       window->GetWebUIBrowserUI()->web_ui()->GetWebContents();
   ASSERT_TRUE(shell_contents);
   ASSERT_TRUE(content::WaitForLoadStop(shell_contents));
@@ -82,11 +82,11 @@ IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
                        NormalWindowUsesWebUIBrowserAndSurfaceEmbed) {
-  WebUIBrowserWindow *window = WebUIBrowserWindow::FromBrowser(browser());
+  WebUIBrowserWindow* window = WebUIBrowserWindow::FromBrowser(browser());
   ASSERT_TRUE(window);
   EXPECT_EQ(nullptr, BrowserView::GetBrowserViewForBrowser(browser()));
 
-  content::WebContents *shell_contents =
+  content::WebContents* shell_contents =
       window->GetWebUIBrowserUI()->web_ui()->GetWebContents();
   ASSERT_TRUE(shell_contents);
   ASSERT_TRUE(content::WaitForLoadStop(shell_contents));
@@ -101,7 +101,7 @@ IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
         .ExtractBool();
   })) << "Limitless shell did not become ready before SurfaceEmbed checking";
 
-  content::WebContents *tab_contents =
+  content::WebContents* tab_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
   ASSERT_TRUE(tab_contents);
   EXPECT_NE(shell_contents, tab_contents);
@@ -119,7 +119,7 @@ IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
                                    browser()->GetProfile(),
                                    /*from_user_gesture=*/true);
   params.omit_from_session_restore = true;
-  BrowserWindowInterface *popup = CreateBrowserWindow(std::move(params));
+  BrowserWindowInterface* popup = CreateBrowserWindow(std::move(params));
   ASSERT_TRUE(popup);
 
   chrome::AddTabAt(popup, GURL("about:blank"), -1, true);
@@ -131,4 +131,4 @@ IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
   CloseBrowserSynchronously(popup);
 }
 
-} // namespace
+}  // namespace
