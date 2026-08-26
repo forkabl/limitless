@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Limitless</title>
+    <link rel="stylesheet" href="chrome://theme/colors.css?sets=ui,chrome">
+    <link rel="stylesheet"
+        href="chrome://resources/css/text_defaults_md.css">
+    <link rel="stylesheet" href="limitless/app.css">
+  </head>
+  <body>
+    <main id="limitless-shell" aria-label="Limitless browser">
+      <webui-browser-app></webui-browser-app>
+      <output
+          id="limitless-build-marker"
+          data-build-id="limitless-phase1-macos-arm64-2b4613f0"
+          data-chromium-revision="2b4613f0a24d234b139f1246028239a2f5dde58c"
+          hidden>
+        limitless-phase1-macos-arm64-2b4613f0
+      </output>
+    </main>
+
+    <script type="module" src="webui_browser.js"></script>
+    <script type="module" src="limitless/app.js"></script>
+  </body>
+</html>

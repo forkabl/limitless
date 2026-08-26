@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Launch the built Limitless app with a workspace-isolated browser profile."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+from _common import (
+    Paths,
+    ToolError,
+    command_text,
+    parse_branding_product_name,
+    reject_managed_switches,
+    require_file,
+    require_generated_args,
+    safe_profile_name,
+    verify_integration,
+    run,
+)
+
+
+FEATURE_SWITCH = "--enable-features=Webium,SurfaceEmbed"
+
+
+def _command(
+    executable: Path, profile: str | Path, extra: list[str]
+) -> list[str | Path]:
+    return [
+        executable,
+        FEATURE_SWITCH,
+        f"--user-data-dir={profile}",
+        *extra,
+    ]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument(
+        "--fresh-profile",
+        action="store_true",
+        help="create a fresh temporary profile and remove it after browser exit",
+    )
+    profiles.add_argument(
+        "--profile-name",
+        default="development",
+        help="persistent profile name under out/LimitlessDebug/LimitlessProfiles",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and print the launch without creating a profile or running",
+    )
+    parser.add_argument(
+        "browser_args",
+        nargs=argparse.REMAINDER,
+        help="browser arguments after --; managed feature/profile switches are rejected",
+    )
+    args = parser.parse_args()
+
+    extra = list(args.browser_args)
+    if extra and extra[0] == "--":
+        extra.pop(0)
+    reject_managed_switches(extra)
+
+    paths = Paths.discover(Path(__file__))
+    verify_integration(paths)
+    require_generated_args(paths)
+    product_name = parse_branding_product_name(paths)
+    executable = (
+        paths.out_dir / f"{product_name}.app" / "Contents" / "MacOS" / product_name
+    )
+    profile_root = paths.out_dir / "LimitlessProfiles"
+
+    if args.dry_run:
+        if args.fresh_profile:
+            profile: str | Path = profile_root / "<fresh-temporary-profile>"
+        else:
+            profile = profile_root / safe_profile_name(args.profile_name)
+        print(f"Would run: {command_text(_command(executable, profile, extra))}")
+        print("No profile was created and no browser was launched.")
+        return 0
+
+    require_file(executable, "built Limitless app executable", executable=True)
+    if profile_root.is_symlink():
+        raise ToolError(f"Profile root may not be a symlink: {profile_root}")
+    profile_root.mkdir(parents=True, exist_ok=True)
+
+    if args.fresh_profile:
+        profile = Path(tempfile.mkdtemp(prefix="run-", dir=profile_root))
+        try:
+            command = _command(executable, profile, extra)
+            print(f"Running: {command_text(command)}")
+            run(command, cwd=paths.chromium_src, capture=False)
+        finally:
+            shutil.rmtree(profile)
+            print(f"Removed temporary browser profile: {profile}")
+        return 0
+
+    profile = profile_root / safe_profile_name(args.profile_name)
+    if profile.is_symlink():
+        raise ToolError(f"Profile directory may not be a symlink: {profile}")
+    profile.mkdir(parents=True, exist_ok=True)
+    command = _command(executable, profile, extra)
+    print(f"Running: {command_text(command)}")
+    run(command, cwd=paths.chromium_src, capture=False)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ToolError as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(2)

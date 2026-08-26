@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Run focused WebUI Browser and Limitless browser tests with fresh profiles."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+from _common import (
+    Paths,
+    ToolError,
+    command_text,
+    reject_managed_switches,
+    require_file,
+    require_generated_args,
+    verify_integration,
+    run,
+)
+
+
+DEFAULT_BROWSER_FILTER = (
+    "LimitlessWebUIBrowserTest.*:WebUIBrowserTest.*:"
+    "WebUIBrowserSurfaceEmbedPixelTest.*"
+)
+DEFAULT_INTERACTIVE_FILTER = "WebUIBrowserInteractiveTest.*"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-browser", action="store_true")
+    parser.add_argument("--skip-interactive", action="store_true")
+    parser.add_argument("--browser-filter", default=DEFAULT_BROWSER_FILTER)
+    parser.add_argument("--interactive-filter", default=DEFAULT_INTERACTIVE_FILTER)
+    parser.add_argument(
+        "test_args",
+        nargs=argparse.REMAINDER,
+        help="common test arguments after --; managed switches are rejected",
+    )
+    args = parser.parse_args()
+    if args.skip_browser and args.skip_interactive:
+        raise ToolError("At least one test suite must remain enabled.")
+
+    extra = list(args.test_args)
+    if extra and extra[0] == "--":
+        extra.pop(0)
+    reject_managed_switches(extra)
+    if any(argument.startswith("--gtest_filter") for argument in extra):
+        raise ToolError(
+            "Use --browser-filter or --interactive-filter, not --gtest_filter."
+        )
+
+    paths = Paths.discover(Path(__file__))
+    verify_integration(paths)
+    require_generated_args(paths)
+    profile_root = paths.out_dir / "LimitlessTestProfiles"
+    suites: list[tuple[str, Path, str]] = []
+    if not args.skip_browser:
+        suites.append(("browser", paths.out_dir / "browser_tests", args.browser_filter))
+    if not args.skip_interactive:
+        suites.append(
+            (
+                "interactive",
+                paths.out_dir / "interactive_ui_tests",
+                args.interactive_filter,
+            )
+        )
+
+    if args.dry_run:
+        for name, executable, test_filter in suites:
+            profile = profile_root / f"<{name}-fresh-profile>"
+            command = [
+                executable,
+                f"--gtest_filter={test_filter}",
+                "--test-launcher-jobs=1",
+                f"--user-data-dir={profile}",
+                *extra,
+            ]
+            print(f"Would run: {command_text(command)}")
+        print("No profiles were created and no tests were run.")
+        return 0
+
+    if profile_root.is_symlink():
+        raise ToolError(f"Test profile root may not be a symlink: {profile_root}")
+    profile_root.mkdir(parents=True, exist_ok=True)
+    for name, executable, test_filter in suites:
+        require_file(executable, f"built {name} test executable", executable=True)
+        profile = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=profile_root))
+        command = [
+            executable,
+            f"--gtest_filter={test_filter}",
+            "--test-launcher-jobs=1",
+            f"--user-data-dir={profile}",
+            *extra,
+        ]
+        try:
+            print(f"Running: {command_text(command)}")
+            run(command, cwd=paths.chromium_src, capture=False)
+        finally:
+            shutil.rmtree(profile)
+            print(f"Removed temporary test profile: {profile}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ToolError as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(2)
