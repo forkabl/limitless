@@ -40,7 +40,7 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "shell/agents/agent_presence_registry.h"
-#include "shell/control_plane/limitless_profile_preference_backend.h"
+#include "shell/control_plane/limitless_running_profile_control_registry.h"
 #include "shell/shortcuts/limitless_command_dispatcher_delegate_mac.h"
 #include "shell/shortcuts/limitless_leader_shortcut_controller.h"
 #include "shell/splits/limitless_split_pane_controller.h"
@@ -387,13 +387,16 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     Profile* profile = browser_window_->GetProfile();
     if (!profile->IsOffTheRecord() && profile->GetPrefs() &&
         profile->GetPrefs()->FindPreference(kRailDensityPref)) {
-      preference_backend_ =
-          std::make_unique<ProfilePreferenceControlBackend>(
-              profile,
+      preference_registration_ =
+          GetRunningProfileControlRegistry().RegisterWindow(
+              browser_window_,
               base::BindRepeating(&SwiftUITabRailHost::OnRailDensityChanged,
                                   weak_this));
-      OnRailDensityChanged(preference_backend_->GetEffectiveValue(
-          PreferenceKey::kRailDensity));
+      if (preference_registration_) {
+        OnRailDensityChanged(
+            preference_registration_->backend()->GetEffectiveValue(
+                PreferenceKey::kRailDensity));
+      }
     }
     workspace_controller_ = std::make_unique<WorkspaceController>(
         browser_window_,
@@ -489,7 +492,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     StopObservingAgentPresence();
     split_controller_->Stop();
     workspace_controller_->Stop();
-    preference_backend_.reset();
+    preference_registration_.reset();
     tab_list_ = nullptr;
     browser_window_ = nullptr;
     title_observers_.clear();
@@ -1394,7 +1397,8 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   std::unique_ptr<WorkspaceController> workspace_controller_;
   std::unique_ptr<SplitPaneController> split_controller_;
   std::unique_ptr<LeaderShortcutController> leader_controller_;
-  std::unique_ptr<ProfilePreferenceControlBackend> preference_backend_;
+  std::unique_ptr<RunningProfileControlRegistry::Registration>
+      preference_registration_;
   base::CallbackListSubscription browser_did_close_subscription_;
   std::vector<std::unique_ptr<TabTitleObserver>> title_observers_;
   bool observing_agent_presence_ = false;

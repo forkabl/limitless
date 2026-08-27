@@ -34,9 +34,10 @@ enum class PreferenceControlTransportStartStatus {
 };
 
 // A local, one-request-per-connection transport. The discovery descriptor and
-// Unix socket are available only to the current OS user. Requests still need
-// the per-process capability carried by the descriptor, and peer credentials
-// are checked before any payload is parsed.
+// Unix socket are available only to the current OS user. The descriptor never
+// contains the capability. Clients receive that secret over a separate
+// protected channel, and peer credentials are checked before any payload is
+// parsed.
 class PreferenceControlTransport {
  public:
   PreferenceControlTransport(ProfilePreferenceControlBackend* backend,

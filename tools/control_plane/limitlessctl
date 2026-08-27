@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Authenticated local control client for a running Limitless profile."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import socket
+import stat
+import struct
+import sys
+import uuid
+
+
+PROTOCOL_VERSION = 1
+RUNTIME_DIRECTORY = "LimitlessControl"
+MAXIMUM_REQUEST_BYTES = 16 * 1024
+MAXIMUM_RESPONSE_BYTES = 32 * 1024
+IO_TIMEOUT_SECONDS = 2.0
+
+
+class ControlError(Exception):
+    def __init__(self, code: str, detail: str | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
+def _canonical_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def _safe_file(path: Path, expected_mode: int) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise ControlError("discovery_unavailable", str(error)) from error
+    if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise ControlError("unsafe_discovery_entry")
+    if stat.S_IMODE(metadata.st_mode) != expected_mode:
+        raise ControlError("unsafe_discovery_permissions")
+    return metadata
+
+
+def _runtime_directory(user_data_directory: Path) -> Path:
+    runtime = user_data_directory / RUNTIME_DIRECTORY
+    metadata = _safe_file(runtime, 0o700)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ControlError("unsafe_discovery_entry")
+    return runtime
+
+
+def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
+    metadata = _safe_file(path, 0o600)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+        raise ControlError("invalid_descriptor")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ControlError("invalid_descriptor", str(error)) from error
+    expected = {
+        "version",
+        "profile_id",
+        "instance_id",
+        "socket_path",
+        "pid",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ControlError("invalid_descriptor")
+    if value["version"] != PROTOCOL_VERSION:
+        raise ControlError("incompatible_version")
+    if not _canonical_uuid(value["profile_id"]) or not _canonical_uuid(
+        value["instance_id"]
+    ):
+        raise ControlError("invalid_descriptor")
+    pid = value["pid"]
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise ControlError("invalid_descriptor")
+    socket_path = Path(value["socket_path"])
+    if socket_path.parent != runtime or socket_path.suffix != ".sock":
+        raise ControlError("invalid_descriptor")
+    socket_metadata = _safe_file(socket_path, 0o600)
+    if not stat.S_ISSOCK(socket_metadata.st_mode):
+        raise ControlError("invalid_descriptor")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError as error:
+        raise ControlError("stale_instance") from error
+    except PermissionError as error:
+        raise ControlError("unsafe_discovery_entry") from error
+    return value
+
+
+def _descriptors(user_data_directory: Path) -> list[dict[str, object]]:
+    runtime = _runtime_directory(user_data_directory)
+    descriptors: list[dict[str, object]] = []
+    for path in sorted(runtime.glob("*.json")):
+        try:
+            descriptors.append(_read_descriptor(path, runtime))
+        except ControlError as error:
+            if error.code not in {"stale_instance", "invalid_descriptor"}:
+                raise
+    return descriptors
+
+
+def _select_descriptor(
+    user_data_directory: Path,
+    profile_identifier: str | None,
+    instance_identifier: str | None,
+) -> dict[str, object]:
+    matches = _descriptors(user_data_directory)
+    if profile_identifier is not None:
+        if not _canonical_uuid(profile_identifier):
+            raise ControlError("invalid_profile")
+        matches = [entry for entry in matches if entry["profile_id"] == profile_identifier]
+    if instance_identifier is not None:
+        if not _canonical_uuid(instance_identifier):
+            raise ControlError("invalid_instance")
+        matches = [entry for entry in matches if entry["instance_id"] == instance_identifier]
+    if not matches:
+        raise ControlError("profile_unavailable")
+    if len(matches) != 1:
+        raise ControlError("ambiguous_profile")
+    return matches[0]
+
+
+def _read_exact(connection: socket.socket, size: int) -> bytes:
+    result = bytearray()
+    while len(result) < size:
+        piece = connection.recv(size - len(result))
+        if not piece:
+            raise ControlError("transport_closed")
+        result.extend(piece)
+    return bytes(result)
+
+
+def _exchange(descriptor: dict[str, object], request: dict[str, object]) -> object:
+    encoded = json.dumps(request, separators=(",", ":")).encode("utf-8")
+    if not encoded or len(encoded) > MAXIMUM_REQUEST_BYTES:
+        raise ControlError("request_oversized")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(IO_TIMEOUT_SECONDS)
+            connection.connect(str(descriptor["socket_path"]))
+            connection.sendall(struct.pack("!I", len(encoded)) + encoded)
+            response_size = struct.unpack("!I", _read_exact(connection, 4))[0]
+            if response_size == 0 or response_size > MAXIMUM_RESPONSE_BYTES:
+                raise ControlError("invalid_response")
+            response = _read_exact(connection, response_size)
+    except socket.timeout as error:
+        raise ControlError("transport_timeout") from error
+    except OSError as error:
+        raise ControlError("transport_unavailable", str(error)) from error
+    try:
+        return json.loads(response)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ControlError("invalid_response") from error
+
+
+def _preference_request(
+    descriptor: dict[str, object],
+    capability: str,
+    operation: str,
+    key: str,
+    value: str | None,
+) -> dict[str, object]:
+    request: dict[str, object] = {
+        "version": PROTOCOL_VERSION,
+        "request_id": str(uuid.uuid4()),
+        "operation": operation,
+        "target": {
+            "profile_id": descriptor["profile_id"],
+            "instance_id": descriptor["instance_id"],
+        },
+        "actor": {"type": "cli", "id": f"limitlessctl:{os.getpid()}"},
+        "authentication": {
+            "scheme": "capability",
+            "credential": capability,
+        },
+        "key": key,
+    }
+    if value is not None:
+        request["value"] = value
+    return request
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="limitlessctl")
+    parser.add_argument("--user-data-dir", type=Path, required=True)
+    parser.add_argument("--profile")
+    parser.add_argument("--instance")
+    parser.add_argument(
+        "--capability-stdin",
+        action="store_true",
+        help="read the capability from one line on stdin",
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands.add_parser("discover")
+    preferences = subcommands.add_parser("preferences")
+    preference_commands = preferences.add_subparsers(
+        dest="preference_command", required=True
+    )
+    get = preference_commands.add_parser("get")
+    get.add_argument("key", choices=["rail_density"])
+    set_value = preference_commands.add_parser("set")
+    set_value.add_argument("key", choices=["rail_density"])
+    set_value.add_argument("value", choices=["compact", "comfortable"])
+    return parser
+
+
+def _read_capability(from_stdin: bool) -> str:
+    if from_stdin:
+        capability = sys.stdin.readline(258).rstrip("\r\n")
+    else:
+        capability = os.environ.get("LIMITLESS_CONTROL_CAPABILITY", "")
+    if (
+        not capability
+        or len(capability.encode("utf-8")) > 256
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in capability)
+    ):
+        raise ControlError("capability_unavailable")
+    return capability
+
+
+def _emit(value: object) -> None:
+    print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+
+
+def main(argv: list[str]) -> int:
+    arguments = _parser().parse_args(argv)
+    try:
+        if arguments.command == "discover":
+            entries = _descriptors(arguments.user_data_dir)
+            _emit(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "status": "success",
+                    "profiles": [
+                        {
+                            "profile_id": entry["profile_id"],
+                            "instance_id": entry["instance_id"],
+                            "pid": entry["pid"],
+                        }
+                        for entry in entries
+                    ],
+                }
+            )
+            return 0
+        descriptor = _select_descriptor(
+            arguments.user_data_dir, arguments.profile, arguments.instance
+        )
+        capability = _read_capability(arguments.capability_stdin)
+        operation = "read" if arguments.preference_command == "get" else "write"
+        value = getattr(arguments, "value", None)
+        _emit(
+            _exchange(
+                descriptor,
+                _preference_request(
+                    descriptor, capability, operation, arguments.key, value
+                ),
+            )
+        )
+        return 0
+    except ControlError as error:
+        result: dict[str, object] = {
+            "version": PROTOCOL_VERSION,
+            "status": "error",
+            "error": error.code,
+        }
+        if error.detail:
+            result["detail"] = error.detail
+        _emit(result)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

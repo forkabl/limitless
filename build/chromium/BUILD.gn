@@ -59,6 +59,7 @@ source_set("swiftui_browser_tests") {
   sources = [
     "../../tests/browser/limitless_control_plane_browsertest.cc",
     "../../tests/browser/limitless_profile_preference_backend_browsertest.cc",
+    "../../tests/browser/limitless_running_profile_control_registry_browsertest.cc",
     "../../tests/browser/limitless_split_pane_controller_browsertest.cc",
     "../../tests/browser/limitless_swiftui_browsertest.mm",
     "../../tests/commands/limitless_command_registry_unittest.cc",
@@ -71,6 +72,7 @@ source_set("swiftui_browser_tests") {
     "../../shell/control_plane:preference_control",
     "../../shell/control_plane:profile_preference_backend",
     "../../shell/control_plane:profile_prefs",
+    "../../shell/control_plane:running_profile_control_registry",
     "../../shell/native/swiftui_rail:rail",
     "../../shell/splits:core",
     "../../shell/workspaces:core",

@@ -227,7 +227,6 @@ bool PreferenceControlTransport::WriteDescriptor() {
   descriptor.Set("profile_id", backend_->profile_identifier());
   descriptor.Set("instance_id", backend_->profile_instance_identifier());
   descriptor.Set("socket_path", socket_path_.value());
-  descriptor.Set("capability", backend_->capability());
   descriptor.Set("pid", base::GetCurrentProcId());
   std::string serialized;
   if (!base::JSONWriter::Write(descriptor, &serialized)) {

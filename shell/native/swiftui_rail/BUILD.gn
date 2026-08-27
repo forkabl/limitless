@@ -110,7 +110,7 @@ source_set("rail") {
     ":compile_swiftui",
     ":swiftui_impl",
     "../../agents:agent_presence",
-    "../../control_plane:profile_preference_backend",
+    "../../control_plane:running_profile_control_registry",
     "../../splits:core",
     "../../workspaces:session_persistence",
     "//base",
