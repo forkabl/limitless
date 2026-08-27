@@ -129,6 +129,31 @@ private func nativeWindows(ownerPID: pid_t) throws -> [NativeWindow] {
   }
 }
 
+private func externalAXSessionUnavailable(excluding targetPID: pid_t) -> Bool {
+  let options: CGWindowListOption = [.excludeDesktopElements, .optionOnScreenOnly]
+  guard let rows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+      as? [[String: Any]] else { return false }
+  var owners = Set<pid_t>()
+  for row in rows {
+    guard let pid = (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+          pid != targetPID,
+          (row[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { continue }
+    owners.insert(pid)
+    if owners.count >= 4 { break }
+  }
+  var unusable = 0
+  for pid in owners {
+    let app = AXUIElementCreateApplication(pid)
+    guard let windows = copyAttribute(app, kAXWindowsAttribute),
+          CFGetTypeID(windows) == CFArrayGetTypeID() else { unusable += 1; continue }
+    let elements = elements(from: windows)
+    if elements.isEmpty || elements.allSatisfy({ stringAttribute($0, kAXRoleAttribute) != kAXWindowRole }) {
+      unusable += 1
+    }
+  }
+  return owners.count >= 2 && unusable == owners.count
+}
+
 private func rawWindowRecordExists(
   ownerPID: pid_t, windowID: CGWindowID
 ) throws -> Bool {
@@ -551,6 +576,11 @@ private func waitForBoundary(
       window: finalAXWindows[0],
       application: application,
       nativeBounds: finalWindows[0].bounds
+    )
+  }
+  if externalAXSessionUnavailable(excluding: pid) {
+    throw ProbeFailure(
+      description: "AX session unavailable: multiple visible applications returned no AXWindow; unlock the session and retry"
     )
   }
   throw ProbeFailure(
