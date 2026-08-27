@@ -81,6 +81,7 @@ STDERR_LOG="$ARTIFACT_DIR/browser.stderr.log"
 CHROME_LOG="$ARTIFACT_DIR/chrome_debug.log"
 RESULT_FILE="$ARTIFACT_DIR/result.txt"
 CDP_RESULT="$ARTIFACT_DIR/cdp_validation.json"
+SHELL_RENDERER_SCREENSHOT="$ARTIFACT_DIR/limitless-shell-renderer-navigation.png"
 touch "$STDOUT_LOG" "$STDERR_LOG" "$CHROME_LOG"
 PLIST_BUDDY=/usr/libexec/PlistBuddy
 [[ -x "$PLIST_BUDDY" ]] || fail "PlistBuddy is required to resolve the app executable"
@@ -143,7 +144,10 @@ python3 "$SCRIPT_DIR/cdp_close.py" \
   --url "$SHELL_URL" \
   --expected-build-id "$EXPECTED_BUILD_ID" \
   --expected-chromium-revision "$CHROMIUM_REVISION" \
+  --screenshot "$SHELL_RENDERER_SCREENSHOT" \
   >"$CDP_RESULT"
+
+[[ -s "$SHELL_RENDERER_SCREENSHOT" ]] || fail "shell renderer screenshot was not captured"
 
 SECONDS_WAITED=0
 while browser_is_running; do
@@ -177,7 +181,9 @@ fi
   echo "shell_ready=true"
   echo "build_id=$EXPECTED_BUILD_ID"
   echo "chromium_revision=$CHROMIUM_REVISION"
+  echo "navigation_checkpoint=address_control_local_page"
   echo "cdp_validation=$CDP_RESULT"
+  echo "shell_renderer_screenshot=$SHELL_RENDERER_SCREENSHOT"
   echo "shutdown=Browser.close"
   echo "stdout_log=$STDOUT_LOG"
   echo "stderr_log=$STDERR_LOG"
@@ -185,5 +191,5 @@ fi
 } >"$RESULT_FILE"
 
 TEST_SUCCEEDED=1
-echo "PASS: live Limitless shell validation and clean shutdown"
+echo "PASS: live Limitless address navigation, renderer capture, and clean shutdown"
 echo "Artifacts: $ARTIFACT_DIR"

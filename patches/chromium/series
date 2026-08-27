@@ -1,1 +1,10 @@
 0001-webui-browser-limitless-resources.patch
+0002-browser-view-swiftui-boundary-probe.patch
+0003-webui-browser-tab-handle-scope.patch
+0004-webui-browser-guest-handler-lifetime.patch
+0005-browser-view-swiftui-tab-rail.patch
+0006-browser-view-leader-shortcuts.patch
+0007-session-workspace-metadata.patch
+0008-session-split-visual-data-validation.patch
+0009-tab-strip-editability-lifecycle.patch
+0010-webui-browser-split-test-wiring.patch

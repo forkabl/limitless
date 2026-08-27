@@ -80,7 +80,23 @@ limitless/
     manifest.json
     series
     0001-webui-browser-limitless-resources.patch
+    0002-browser-view-swiftui-boundary-probe.patch
+    0003-webui-browser-tab-handle-scope.patch
+    0004-webui-browser-guest-handler-lifetime.patch
+    0005-browser-view-swiftui-tab-rail.patch
+    0006-browser-view-leader-shortcuts.patch
   shell/
+    agents/
+      herdr_agent_provider.{h,cc}
+      agent_presence_registry.{h,cc}
+    native/swiftui_rail/
+      BUILD.gn
+      limitless_swiftui_rail.swift
+      limitless_swiftui_rail_host.{h,mm}
+    shortcuts/
+      BUILD.gn
+      limitless_leader_shortcut_controller.{h,mm}
+      limitless_command_dispatcher_delegate_mac.{h,mm}
     browser.mojom adapters, C++ only when required
     resources/
       app.html.ts
@@ -99,9 +115,85 @@ limitless/
     test
 ```
 
-Names are proposed, not implemented. The important boundary is that only the ordered patch files alter upstream-owned paths.
+The six patch filenames shown are the current experimental series. Other tree entries describe the intended product layout. Only ordered, hashed patch files may alter upstream-owned paths.
+
+The fifth patch constructs the native SwiftUI tab rail and suppresses
+Chromium's horizontal tab strip for that window. This is behavior evidence,
+not visual acceptance. Chromium toolbar and other top surfaces remain, and the
+pixel gate stays red until a real exact-window PNG can be inspected. External
+AX and native input acceptance also remain red.
+
+The display-only Agents slice itself adds no upstream file or patch. Its
+provider, transient registry, SwiftUI projection, bridge, and tests are
+product-owned. The existing `shell/native/swiftui_rail:rail` target depends on
+`shell/agents:agent_presence`; the external browser-test target also links
+`shell/agents:agent_presence_tests`. The slice reuses the BrowserView host seam
+already accounted for by patches `0002` and `0005`. The later leader-shortcut
+slice is patch `0006`: it overlaps `browser_view.cc` and adds only
+`browser_native_widget_mac.mm` to the combined upstream inventory.
 
 ## GN target design
+
+### Product-owned leader shortcut target
+
+`shell/shortcuts:leader_shortcuts` owns the typed per-window state machine,
+command map, command-line policy, macOS event deduplication, timeout, exact
+window monitoring, and product command-dispatcher delegate. The existing
+`shell/native/swiftui_rail:rail` target publicly depends on it and supplies the
+authorized Chromium tab actions plus the SwiftUI armed-state projection.
+`build/chromium:swiftui_browser_tests` links the same production targets.
+
+Patch `0006` contains only two calls into that product boundary:
+`BrowserView::PreHandleKeyboardEvent()` for renderer-originated events and
+`BrowserNativeWidgetMac::OnWindowInitialized()` for the native macOS command
+dispatcher. Disabled or ineligible windows receive Chromium's stock delegate.
+The focused browser journeys exercise renderer, Views-control, and in-process
+Application-target AppKit routing, but external macOS input, IME, AX, and pixel
+acceptance remain real-app gates.
+
+### Product-owned Herdr presence targets
+
+`shell/agents:agent_presence` owns the Herdr CLI adapter and browser-process
+presence registry. SwiftUI receives sanitized arrays through the existing
+Objective-C++ host and never launches a process or parses JSON. The registry is
+transient, starts when the first regular-window rail observes it, stops when the
+last observer leaves, coalesces unchanged snapshots, and grants no browser
+capability. Off-the-record rails do not observe it.
+
+Production executable resolution accepts an explicit absolute
+`--limitless-herdr-executable` override, then only
+`/opt/homebrew/bin/herdr` and `/usr/local/bin/herdr`. It does not search the
+inherited `PATH` or accept an environment-provided binary path. A candidate must
+be a regular executable. Each poll uses the exact argv
+`[herdr, api, snapshot]`, without a shell or interpolation, on one sequenced
+off-UI worker. The provider enforces a short timeout, prevents overlapping
+polls, rejects late replies after teardown, bounds and validates the response,
+and kills and reaps child process groups on failure.
+
+The adapter projects every agent in the current Herdr session across that
+session's workspaces. It does not aggregate named Herdr sessions and cannot
+prove that a visible agent is using Limitless. Same-user presence is not
+authentication or browser authorization. Missing, denied, unavailable, timed
+out, malformed, and incompatible results clear rows and publish an explicit
+state; no unlabeled last-good snapshot is retained.
+
+`shell/agents:agent_presence_tests` contains the nine focused provider and
+registry tests, including residual process-group descendant cleanup after a
+normal or nonzero leader exit. `build/chromium:swiftui_browser_tests` links
+those tests and the native rail suite, including the three focused Herdr
+browser journeys and seven Leader journeys. With retries disabled, the
+provider and registry suite passes 9 of 9, the focused Herdr trio passes 3 of
+3, and the current full native suite passes 17 of 17.
+
+The starvation journey uses 40 real Chromium tabs and 12 agents. Transparent,
+non-hit-testable, non-accessible `NSViewRepresentable` probes occupy the actual
+`GeometryReader`-proposed bounds for both viewports and both scroll contents.
+The Objective-C++ bridge forces native layout and reads their converted
+post-layout frames, so the proof validates positive area, rail containment,
+disjoint viewports, minimum and maximum viewport bounds, and overflowing
+content without relying on inferred row heights. This target expansion changes
+only the Limitless build graph. Patch hashes, upstream files, and watched
+symbols remain unchanged.
 
 ### Product resource target
 

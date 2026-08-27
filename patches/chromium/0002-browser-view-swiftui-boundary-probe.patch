@@ -1,0 +1,258 @@
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index dae85ee965cf252eb65134baf6bfdb83d8514d1f..e87ff846c48d1d0844ba847dc7d63422e510dd1b 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -8,6 +8,7 @@ import("//build/config/features.gni")
+ import("//build/config/ozone.gni")
+ import("//build/config/ui.gni")
+ import("//chrome/browser/buildflags.gni")
++import("//chrome/browser/ui/limitless.gni")
+ import("//chrome/common/features.gni")
+ import("//components/captive_portal/core/features.gni")
+ import("//components/compose/features.gni")
+@@ -3658,6 +3659,11 @@ static_library("ui") {
+     allow_circular_includes_from +=
+         [ "//chrome/browser/ui/webui/tab_strip_internals:impl" ]
+   }
++
++  if (is_mac && limitless_root != "") {
++    defines += [ "LIMITLESS_SWIFTUI_BOUNDARY_PROBE" ]
++    deps += [ "$limitless_root/build/chromium:swiftui_rail" ]
++  }
+ }
+ 
+ # These are the dependencies for the "ui" target that are outside of
+diff --git a/chrome/browser/ui/limitless.gni b/chrome/browser/ui/limitless.gni
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfcd9669bb86de63dd219a1627f88314eb760ff7
+--- /dev/null
++++ b/chrome/browser/ui/limitless.gni
+@@ -0,0 +1,14 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++declare_args() {
++  # System-absolute path to an optional downstream browser product repository.
++  # An empty value leaves Chromium's build graph unchanged.
++  limitless_root = ""
++}
++
++if (limitless_root != "") {
++  assert(path_exists("$limitless_root/build/chromium/BUILD.gn"),
++         "limitless_root must contain build/chromium/BUILD.gn.")
++}
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 6fb9d241169f237499e4f7c8336959e389bbb52d..d871f0ce557d2a7f13f6327ba8b606038547472a 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -388,6 +388,10 @@
+ #include "components/remote_cocoa/browser/application_host.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC) && defined(LIMITLESS_SWIFTUI_BOUNDARY_PROBE)
++#include "limitless_swiftui_rail_host.h"
++#endif
++
+ #if defined(USE_AURA)
+ #include "chrome/browser/ui/views/theme_profile_key.h"
+ #include "ui/aura/client/window_parenting_client.h"
+@@ -940,6 +944,15 @@ BrowserView::BrowserView(Browser* browser)
+ 
+   set_contents_view(multi_contents_view_);
+ 
++#if BUILDFLAG(IS_MAC) && defined(LIMITLESS_SWIFTUI_BOUNDARY_PROBE)
++  if (browser_->GetType() == BrowserWindowInterface::TYPE_NORMAL) {
++    auto limitless_swiftui_rail = limitless::MaybeCreateSwiftUIBoundaryProbe();
++    if (limitless_swiftui_rail) {
++      limitless_swiftui_rail_ = AddChildView(std::move(limitless_swiftui_rail));
++    }
++  }
++#endif
++
+   // InfoBarContainer needs to be added as a child here for drop-shadow, but
+   // needs to come after toolbar in focus order (see EnsureFocusOrder()).
+   infobar_container_ =
+@@ -4479,6 +4492,9 @@ void BrowserView::GetAccessiblePanes(std::vector<views::View*>* panes) {
+   if (vertical_tab_strip_region_view_) {
+     panes->push_back(vertical_tab_strip_region_view_);
+   }
++  if (limitless_swiftui_rail_) {
++    panes->push_back(limitless_swiftui_rail_);
++  }
+   if (toolbar_ && toolbar_->custom_tab_bar()) {
+     panes->push_back(toolbar_->custom_tab_bar());
+   }
+@@ -5064,6 +5080,7 @@ void BrowserView::AddedToWidget() {
+   layout_views.toolbar = toolbar_;
+   layout_views.infobar_container = infobar_container_;
+   layout_views.multi_contents_view = multi_contents_view_;
++  layout_views.limitless_swiftui_rail = limitless_swiftui_rail_;
+   layout_views.side_panel = side_panel_;
+   layout_views.top_container_separator = top_container_separator_;
+   // LINT.ThenChange(//chrome/browser/ui/views/frame/layout/browser_view_layout.h:BrowserViewLayoutViews)
+diff --git a/chrome/browser/ui/views/frame/browser_view.h b/chrome/browser/ui/views/frame/browser_view.h
+index 94b4229b8846159f0501d3dbd104526470168b82..98aafda32b2cc547e7b8847bfe056b3ebe8281e6 100644
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -276,6 +276,10 @@ class BrowserView : public BrowserWindow,
+     return vertical_tab_strip_region_view_.get();
+   }
+ 
++  views::View* limitless_swiftui_rail_for_testing() const {
++    return limitless_swiftui_rail_;
++  }
++
+   OrganizerPanelView* organizer_panel_container_for_testing() const {
+     return organizer_panel_container_;
+   }
+@@ -1205,6 +1209,10 @@ class BrowserView : public BrowserWindow,
+   // The view that contains all visible WebContents.
+   raw_ptr<MultiContentsView> multi_contents_view_ = nullptr;
+ 
++  // Optional product-owned native presentation used only by the explicit
++  // Gate 2B boundary probe. Chromium remains the tab and content authority.
++  raw_ptr<views::View> limitless_swiftui_rail_ = nullptr;
++
+   // The view responsible for housing the contents of the vertical tab strip.
+   raw_ptr<VerticalTabStripRegionView> vertical_tab_strip_region_view_ = nullptr;
+   raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout.h b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+index 04ce33b996df2279123d26d474a371c6de735ca3..a24c885d25b61bfff9c6216fa74debea80aca055 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+@@ -77,6 +77,7 @@ struct BrowserViewLayoutViews {
+   raw_ptr<views::View> toolbar = nullptr;
+   raw_ptr<InfoBarContainerView> infobar_container = nullptr;
+   raw_ptr<MultiContentsView> multi_contents_view = nullptr;
++  raw_ptr<views::View> limitless_swiftui_rail = nullptr;
+   raw_ptr<SidePanel> side_panel = nullptr;
+   raw_ptr<SidePanelAnimationContentView> side_panel_animation_content = nullptr;
+ 
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 3a3d1a6a490dfbf29ebff7b2d7d6637ebd5caac4..e0ec1b57a2e2cecf5ad712ec1af41dca70bb439b 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -116,6 +116,7 @@ void InsetHorizontal(gfx::Rect& rect, int amount, bool leading) {
+ struct BrowserViewTabbedLayoutImpl::HorizontalLayout {
+   VerticalTabStripCollapsedState vertical_tab_strip_collapsed_state =
+       VerticalTabStripCollapsedState::kExpanded;
++  int limitless_swiftui_rail_width = 0;
+   int vertical_tab_strip_width = 0;
+   int side_panel_width = 0;
+   int min_content_width = 0;
+@@ -386,6 +387,11 @@ BrowserViewTabbedLayoutImpl::CalculateHorizontalLayout(
+ 
+   layout.min_content_width = kContentsContainerMinimumWidth;
+ 
++  if (const auto* const rail = views().limitless_swiftui_rail.get();
++      IsParentedToAndVisible(rail, views().browser_view)) {
++    layout.limitless_swiftui_rail_width = rail->GetPreferredSize().width();
++  }
++
+   // Get information about the vertical tabstrip, if present.
+   const int toolbar_minimum_width = views().toolbar->GetMinimumSize().width();
+   int min_vertical_tab_strip_width = 0;
+@@ -428,7 +434,8 @@ BrowserViewTabbedLayoutImpl::CalculateHorizontalLayout(
+       // Subtract everything that must go to the right of the vertical tabstrip
+       // from the available width.
+       const int remainder =
+-          params.visual_client_area.width() - toolbar_minimum_width -
++          params.visual_client_area.width() -
++          layout.limitless_swiftui_rail_width - toolbar_minimum_width -
+           base::ClampCeil(
+               params.trailing_exclusion.ContentWithPadding().width());
+       preferred_vertical_tab_strip_width =
+@@ -463,6 +470,7 @@ BrowserViewTabbedLayoutImpl::CalculateHorizontalLayout(
+     // it is forced into content height.
+     if (!layout.force_top_container_to_top) {
+       const int remainder = params.visual_client_area.width() -
++                            layout.limitless_swiftui_rail_width -
+                             (toolbar_minimum_width + layout.side_panel_padding);
+       layout.force_top_container_to_top = remainder < min_side_panel_width;
+ 
+@@ -490,6 +498,7 @@ BrowserViewTabbedLayoutImpl::CalculateHorizontalLayout(
+ 
+   // Determine how much space is left to allocate.
+   int remaining = params.visual_client_area.width() - layout.min_content_width -
++                  layout.limitless_swiftui_rail_width -
+                   layout.side_panel_padding - min_vertical_tab_strip_width -
+                   min_side_panel_width;
+ 
+@@ -704,6 +713,11 @@ gfx::Size BrowserViewTabbedLayoutImpl::GetMinimumSize(
+           ? views().side_panel->GetMinimumSize()
+           : gfx::Size();
+   const gfx::Size main_area_size = GetMinimumMainAreaSize(params);
++  const int limitless_swiftui_rail_width =
++      IsParentedToAndVisible(views().limitless_swiftui_rail.get(),
++                             views().browser_view)
++          ? views().limitless_swiftui_rail->GetPreferredSize().width()
++          : 0;
+ 
+   int min_height = horizontal_tabstrip_size.height() +
+                    std::max({side_panel_size.height(), main_area_size.height(),
+@@ -711,7 +725,8 @@ gfx::Size BrowserViewTabbedLayoutImpl::GetMinimumSize(
+ 
+   // This assumes a horizontal tabstrip. There is also a hard minimum on the
+   // width of the browser defined by `kMainBrowserContentsMinimumWidth`.
+-  int min_width = vertical_tabstrip_size.width() +
++  int min_width = limitless_swiftui_rail_width +
++                  vertical_tabstrip_size.width() +
+                   std::max({horizontal_tabstrip_size.width(),
+                             side_panel_size.width() + main_area_size.width(),
+                             kMainBrowserContentsMinimumWidth});
+@@ -767,6 +782,17 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+   bool clip_content_for_animation = false;
+   gfx::Rect unclipped_contents_region = params.visual_client_area;
+ 
++  if (IsParentedTo(views().limitless_swiftui_rail, views().browser_view)) {
++    const int rail_width = horizontal_layout.limitless_swiftui_rail_width;
++    const gfx::Rect rail_bounds(params.visual_client_area.x(),
++                                params.visual_client_area.y(), rail_width,
++                                params.visual_client_area.height());
++    layout.AddChild(views().limitless_swiftui_rail, rail_bounds,
++                    rail_width > 0);
++    params.InsetHorizontal(rail_width, /*leading=*/true);
++    InsetHorizontal(unclipped_contents_region, rail_width, /*leading=*/true);
++  }
++
+   // Lay out vertical tab strip if visible.
+   int collapsed_vertical_tab_strip_adjustment = 0;
+   const VerticalTabStripAnimation& vertical_tab_strip_animation =
+diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
+index 942a38bfb95ade08f6e8058d26c6ee9b8cf88d79..fe719e8e10e8c4eedc5473a8074c1b28c98da728 100644
+--- a/chrome/browser/ui/webui_browser/BUILD.gn
++++ b/chrome/browser/ui/webui_browser/BUILD.gn
+@@ -2,19 +2,9 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//chrome/browser/ui/limitless.gni")
+ import("//mojo/public/tools/bindings/mojom.gni")
+ 
+-declare_args() {
+-  # System-absolute path to the Limitless repository. An empty value keeps
+-  # the Chromium build graph and WebUI Browser resources unchanged.
+-  limitless_root = ""
+-}
+-
+-if (limitless_root != "") {
+-  assert(path_exists("$limitless_root/build/chromium/BUILD.gn"),
+-         "limitless_root must point to the Limitless repository.")
+-}
+-
+ assert(!is_android)
+ 
+ source_set("headers") {
+@@ -221,7 +211,10 @@ source_set("browser_tests") {
+   ]
+ 
+   if (limitless_root != "") {
+-    deps += [ "$limitless_root/build/chromium:webui_browser_tests" ]
++    deps += [
++      "$limitless_root/build/chromium:swiftui_browser_tests",
++      "$limitless_root/build/chromium:webui_browser_tests",
++    ]
+   }
+ }
+ 

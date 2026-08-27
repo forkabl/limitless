@@ -1,0 +1,39 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+assert(is_mac && current_cpu == "arm64",
+       "The Herdr presence adapter supports the macOS arm64 v1 target only.")
+
+source_set("agent_presence") {
+  sources = [
+    "agent_presence_registry.cc",
+    "agent_presence_registry.h",
+    "herdr_agent_provider.cc",
+    "herdr_agent_provider.h",
+  ]
+
+  public = [
+    "agent_presence_registry.h",
+    "herdr_agent_provider.h",
+  ]
+
+  public_configs = [ ":agent_presence_public" ]
+
+  deps = [ "//base" ]
+}
+
+config("agent_presence_public") {
+  include_dirs = [ "../.." ]
+}
+
+source_set("agent_presence_tests") {
+  testonly = true
+  sources = [ "../../tests/agents/limitless_agent_presence_unittest.cc" ]
+
+  deps = [
+    ":agent_presence",
+    "//base/test:test_support",
+    "//testing/gtest",
+  ]
+}

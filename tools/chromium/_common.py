@@ -12,9 +12,10 @@ import shlex
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 
 PIN_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -232,7 +233,11 @@ def _string_list(
 
 def _safe_upstream_path(value: str, context: str) -> None:
     candidate = Path(value)
-    if candidate.is_absolute() or ".." in candidate.parts or value.startswith("-"):
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or value.startswith(("-", ":"))
+    ):
         raise ToolError(f"{context} is not a safe Chromium-relative path: {value!r}")
     if value == "CHANGELOG.md" or value.endswith("/CHANGELOG.md"):
         raise ToolError(f"{context} may not name a CHANGELOG.md file.")
@@ -430,12 +435,11 @@ def _strict_apply(
         )
 
 
-def expected_patched_entries(
-    paths: Paths, manifest: Manifest
-) -> dict[str, tuple[str, str] | None]:
-    """Return path -> (mode, blob SHA) for the exact fully patched tree."""
-    if not manifest.patches:
-        return {}
+@contextmanager
+def temporary_git_index(
+    paths: Paths,
+) -> Iterator[tuple[dict[str, str], Path]]:
+    """Yield an isolated Git index and object directory for patch operations."""
     git_dir = _git_dir(paths)
     object_directory = git_dir / "objects"
     with tempfile.TemporaryDirectory(prefix="limitless-patch-index-") as temporary:
@@ -450,21 +454,45 @@ def expected_patched_entries(
                 "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.fspath(object_directory),
             }
         )
-        run(
-            ["git", "read-tree", "HEAD"],
-            cwd=paths.chromium_src,
+        yield environment, temporary_path
+
+
+def populate_temporary_index(
+    paths: Paths,
+    entries: Sequence[PatchEntry],
+    environment: Mapping[str, str],
+) -> str:
+    """Populate a temporary index with a strict patch prefix and return its tree."""
+    run(
+        ["git", "read-tree", "HEAD"],
+        cwd=paths.chromium_src,
+        env=environment,
+    )
+    for entry in entries:
+        patch_path = paths.patches_dir / entry.file
+        _strict_apply(
+            paths,
+            patch_path,
             env=environment,
+            cached=True,
+            check_only=True,
         )
-        for entry in manifest.patches:
-            patch_path = paths.patches_dir / entry.file
-            _strict_apply(
-                paths,
-                patch_path,
-                env=environment,
-                cached=True,
-                check_only=True,
-            )
-            _strict_apply(paths, patch_path, env=environment, cached=True)
+        _strict_apply(paths, patch_path, env=environment, cached=True)
+    return run(
+        ["git", "write-tree"],
+        cwd=paths.chromium_src,
+        env=environment,
+    ).stdout.strip()
+
+
+def expected_patched_entries(
+    paths: Paths, manifest: Manifest
+) -> dict[str, tuple[str, str] | None]:
+    """Return path -> (mode, blob SHA) for the exact fully patched tree."""
+    if not manifest.patches:
+        return {}
+    with temporary_git_index(paths) as (environment, _):
+        populate_temporary_index(paths, manifest.patches, environment)
 
         names_output = run(
             ["git", "diff", "--cached", "--name-only", "-z", "HEAD"],

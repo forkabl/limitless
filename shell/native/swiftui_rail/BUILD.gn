@@ -1,0 +1,126 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/config/mac/mac_sdk.gni")
+
+assert(is_mac && current_cpu == "arm64",
+       "The Gate 2B SwiftUI boundary probe supports macOS arm64 only.")
+
+_swift_module = "LimitlessSwiftUIBoundaryProbe"
+_swift_output_dir = "$target_out_dir/swiftui_action"
+_swift_object = "$_swift_output_dir/${_swift_module}.o"
+_swift_module_file = "$_swift_output_dir/${_swift_module}.swiftmodule"
+_swift_module_doc = "$_swift_output_dir/${_swift_module}.swiftdoc"
+_swift_module_source_info =
+    "$_swift_output_dir/${_swift_module}.swiftsourceinfo"
+_swift_abi_descriptor = "$_swift_output_dir/${_swift_module}.abi.json"
+_swift_header = "$target_gen_dir/${_swift_module}.h"
+_swift_runtime_dir = mac_bin_path + "../lib/swift/macosx"
+_swift_sdk_runtime_dir = "$mac_sdk_path/usr/lib/swift"
+
+action("compile_swiftui") {
+  script = "../../../tools/build/compile_mac_swift.py"
+  sources = [ "limitless_swiftui_rail.swift" ]
+  outputs = [
+    _swift_header,
+    _swift_object,
+    _swift_abi_descriptor,
+    _swift_module_doc,
+    _swift_module_file,
+    _swift_module_source_info,
+  ]
+
+  args = [
+    "--swiftc",
+    mac_bin_path + "swiftc",
+    "--sdk",
+    rebase_path(mac_sdk_path, root_build_dir),
+    "--target",
+    "arm64-apple-macos$mac_deployment_target",
+    "--module-name",
+    _swift_module,
+    "--header",
+    rebase_path(_swift_header, root_build_dir),
+    "--object",
+    rebase_path(_swift_object, root_build_dir),
+    "--swiftmodule",
+    rebase_path(_swift_module_file, root_build_dir),
+    "--xcode-build",
+    xcode_build,
+  ]
+
+  if (is_debug) {
+    args += [ "--debug" ]
+  } else {
+    args += [ "--optimize" ]
+  }
+  args += [ rebase_path(sources[0], root_build_dir) ]
+}
+
+config("swiftui_compile") {
+  include_dirs = [ target_gen_dir ]
+}
+
+config("swiftui_link") {
+  lib_dirs = [
+    _swift_runtime_dir,
+    _swift_sdk_runtime_dir,
+  ]
+  libs = [ "$_swift_runtime_dir/libswiftCompatibilityPacks.a" ]
+  ldflags = [ "-Wl,-rpath,/usr/lib/swift" ]
+
+  frameworks = [
+    "ApplicationServices.framework",
+    "AppKit.framework",
+    "Foundation.framework",
+    "SwiftUI.framework",
+  ]
+}
+
+# Carry the generated object through GN's dependency graph instead of exposing
+# it as a path-valued library. This keeps Swift-only edits from restamping
+# unrelated intermediate Chromium archives.
+static_library("swiftui_impl") {
+  sources = [ _swift_object ]
+  deps = [ ":compile_swiftui" ]
+}
+
+config("rail_public") {
+  include_dirs = [ "." ]
+}
+
+source_set("rail") {
+  sources = [
+    "limitless_swiftui_rail_host.h",
+    "limitless_swiftui_rail_host.mm",
+  ]
+
+  public_deps = [
+    "../../shortcuts:leader_shortcuts",
+    "../../workspaces:core",
+    "//ui/views",
+  ]
+  public_configs = [
+    ":rail_public",
+    ":swiftui_link",
+  ]
+
+  deps = [
+    ":compile_swiftui",
+    ":swiftui_impl",
+    "../../agents:agent_presence",
+    "../../splits:core",
+    "../../workspaces:session_persistence",
+    "//base",
+    "//chrome/browser/profiles",
+    "//chrome/browser/tab_list",
+    "//chrome/browser/ui/browser_window",
+    "//components/tabs:public",
+    "//content/public/browser",
+    "//ui/base",
+    "//ui/events",
+    "//ui/gfx",
+  ]
+  configs += [ ":swiftui_compile" ]
+}

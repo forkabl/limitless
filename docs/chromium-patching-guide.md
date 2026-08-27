@@ -327,11 +327,29 @@ upstream a generic hook, or change the product architecture.
 
 ## Current Limitless boundary
 
-At the current architecture gate, Limitless is designed to reuse Chromium's
-`WebUIBrowserWindow` and SurfaceEmbed paths. The Gate 2 validation surface is
-limited to resource build integration and conditional Limitless resource
-selection. It does not patch the browser-window factory or introduce a Limitless
-`BrowserWindow` subclass.
+At the current architecture gate, Limitless retains the earlier
+`WebUIBrowserWindow` and SurfaceEmbed evidence while evaluating a
+BrowserView-hosted SwiftUI candidate. Product UI, tab projection, Herdr presence,
+Leader state, command mapping, policy, and tests remain in Limitless-owned
+targets. The series does not patch the browser-window factory or introduce a
+Limitless `BrowserWindow` subclass.
+
+Patch `0006-browser-view-leader-shortcuts.patch` adds two conditional adapter
+calls to existing Chromium lifecycle and input seams:
+
+- `BrowserView::PreHandleKeyboardEvent` offers renderer-originated keyboard
+  events to the exact window's product-owned Leader controller before Chromium
+  continues its normal handling;
+- `BrowserNativeWidgetMac::OnWindowInitialized` asks a narrowly named
+  product-owned factory for an exact-window command-dispatcher delegate and
+  installs Chromium's stock delegate when the product is disabled or the window
+  is ineligible.
+
+The patch contains no shortcut map, tab mutation, timer, policy, or SwiftUI
+presentation logic. Renderer, Views-control, and in-process APPLICATION tests
+exercise the product-owned routes, but external hardware input, IME, AX, and
+pixel acceptance remain separate red gates. Any expansion beyond these two
+watched symbols requires a fresh patch-surface review.
 
 The current and expected production patches are specified only in
 `architecture/patch-surface.md`. If implementation discovers another required

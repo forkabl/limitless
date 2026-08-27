@@ -1,0 +1,34 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+assert(is_mac && current_cpu == "arm64",
+       "Limitless split panes support the macOS arm64 v1 target only.")
+
+config("split_panes_public") {
+  include_dirs = [ "." ]
+}
+
+source_set("core") {
+  sources = [
+    "limitless_split_pane_controller.cc",
+    "limitless_split_pane_controller.h",
+  ]
+
+  public_configs = [ ":split_panes_public" ]
+
+  public_deps = [
+    "//base",
+    "//chrome/browser/ui/tabs:tab_strip",
+    "//components/tabs:public",
+  ]
+
+  deps = [
+    "../workspaces:core",
+    "//chrome/browser/profiles:profile",
+    "//chrome/browser/tab_list",
+    "//chrome/browser/ui/browser_window",
+    "//chrome/browser/ui/focus",
+    "//components/split_tabs",
+  ]
+}

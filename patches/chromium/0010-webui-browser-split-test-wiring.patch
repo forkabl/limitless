@@ -1,0 +1,13 @@
+diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
+index fe719e8e10e8c4eedc5473a8074c1b28c98da728..506069c164295319bd54bdd5031dd13df09aa098 100644
+--- a/chrome/browser/ui/webui_browser/BUILD.gn
++++ b/chrome/browser/ui/webui_browser/BUILD.gn
+@@ -240,4 +240,8 @@ source_set("interactive_ui_tests") {
+     "//ui/gfx/geometry",
+     "//ui/views:test_support",
+   ]
++
++  if (limitless_root != "") {
++    deps += [ "$limitless_root/build/chromium:split_interactive_ui_tests" ]
++  }
+ }

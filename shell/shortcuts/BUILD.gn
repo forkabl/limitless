@@ -1,0 +1,32 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+assert(is_mac && current_cpu == "arm64",
+       "Limitless v1 leader shortcuts support macOS arm64 only.")
+
+source_set("leader_shortcuts") {
+  sources = [
+    "limitless_command_dispatcher_delegate_mac.h",
+    "limitless_command_dispatcher_delegate_mac.mm",
+    "limitless_leader_shortcut_controller.h",
+    "limitless_leader_shortcut_controller.mm",
+  ]
+
+  public_configs = [ ":leader_shortcuts_public" ]
+  frameworks = [ "AppKit.framework" ]
+
+  deps = [
+    "//base",
+    "//chrome/browser/ui/cocoa",
+    "//components/input",
+    "//ui/base",
+    "//ui/content_accelerators",
+    "//ui/events",
+    "//ui/gfx",
+  ]
+}
+
+config("leader_shortcuts_public") {
+  include_dirs = [ "." ]
+}

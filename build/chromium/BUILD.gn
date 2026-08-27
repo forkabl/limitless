@@ -12,6 +12,12 @@ group("resources") {
   public_deps = [ "../../shell/resources" ]
 }
 
+# Gate 2B compiles the product-owned SwiftUI boundary probe through Chromium's
+# normal Apple build graph.
+group("swiftui_rail") {
+  public_deps = [ "../../shell/native/swiftui_rail:rail" ]
+}
+
 # This source set is folded into Chromium's existing WebUI Browser browser-test
 # target by the validation patch. The tests remain owned by limitless/tests.
 source_set("webui_browser_tests") {
@@ -22,15 +28,91 @@ source_set("webui_browser_tests") {
 
   deps = [
     "//base/test:test_support",
+    "//chrome/browser/profiles",
     "//chrome/browser/ui",
     "//chrome/browser/ui/webui_browser",
     "//chrome/browser/ui/webui_browser:impl",
     "//chrome/common:chrome_features",
     "//chrome/test:test_support",
+    "//components/guest_contents/browser",
     "//components/surface_embed/common",
     "//content/public/browser",
     "//content/test:test_support",
+    "//mojo/public/cpp/test_support:test_utils",
+    "//net:test_support",
     "//ui/base",
+    "//url",
+  ]
+}
+
+source_set("swiftui_browser_tests") {
+  testonly = true
+  defines = [ "HAS_OUT_OF_PROC_TEST_RUNNER" ]
+  frameworks = [ "AppKit.framework" ]
+
+  sources = [
+    "../../tests/browser/limitless_split_pane_controller_browsertest.cc",
+    "../../tests/browser/limitless_swiftui_browsertest.mm",
+  ]
+
+  deps = [
+    "../../shell/agents:agent_presence",
+    "../../shell/agents:agent_presence_tests",
+    "../../shell/native/swiftui_rail:rail",
+    "../../shell/splits:core",
+    "../../shell/workspaces:core",
+    "//base",
+    "//base/test:test_support",
+    "//chrome/browser:browser_process",
+    "//chrome/browser/prefs:util",
+    "//chrome/browser/profiles:profile_manager",
+    "//chrome/browser/profiles:profile_test_util",
+    "//chrome/browser/sessions",
+    "//chrome/browser/sessions:test_support",
+    "//chrome/browser/tab_list",
+    "//chrome/browser/ui",
+    "//chrome/browser/ui/browser_window",
+    "//chrome/browser/ui/focus",
+    "//chrome/browser/ui/tabs:tab_strip",
+    "//chrome/browser/ui/webui_browser",
+    "//chrome/common",
+    "//chrome/test:test_support",
+    "//components/input",
+    "//components/sessions",
+    "//components/split_tabs",
+    "//components/tabs:public",
+    "//content/public/browser",
+    "//content/test:test_support",
+    "//net:test_support",
+    "//ui/base:test_support",
+    "//ui/events:test_support",
+    "//ui/views",
+    "//ui/views:test_support",
+    "//url",
+  ]
+}
+
+source_set("split_interactive_ui_tests") {
+  testonly = true
+  defines = [ "HAS_OUT_OF_PROC_TEST_RUNNER" ]
+
+  sources = [
+    "../../tests/interactive/limitless_split_pane_drag_interactive_uitest.cc",
+  ]
+
+  deps = [
+    "../../shell/splits:core",
+    "../../shell/workspaces:core",
+    "//base",
+    "//base/test:test_support",
+    "//chrome/browser/tab_list",
+    "//chrome/browser/ui",
+    "//chrome/browser/ui/tabs:tab_strip",
+    "//chrome/browser/ui/views/tabs/dragging:tab_drag_controller_interactive_test_mixin",
+    "//chrome/test:test_support",
+    "//components/split_tabs",
+    "//components/tabs:public",
+    "//content/test:test_support",
     "//url",
   ]
 }
