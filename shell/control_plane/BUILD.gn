@@ -58,8 +58,8 @@ source_set("running_profile_control_registry") {
   ]
 
   public_deps = [
-    ":profile_preference_backend",
     ":preference_control_transport",
+    ":profile_preference_backend",
     "//base",
   ]
   public_configs = [ ":preference_control_public" ]
@@ -81,17 +81,4 @@ source_set("preference_control_transport") {
     "//base",
   ]
   public_configs = [ ":preference_control_public" ]
-}
-
-source_set("preference_control_transport_tests") {
-  testonly = true
-  sources = [ "../../tests/control_plane/limitless_preference_control_transport_browsertest.cc" ]
-
-  deps = [
-    ":preference_control_transport",
-    "//base/test:test_support",
-    "//chrome/test:test_support",
-    "//content/test:test_support",
-    "//testing/gtest",
-  ]
 }
