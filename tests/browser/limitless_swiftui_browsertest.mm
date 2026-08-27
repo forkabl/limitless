@@ -880,8 +880,8 @@ IN_PROC_BROWSER_TEST_F(
            compact->first_tab_row_height == 28;
   }));
 
-  browser()->profile()->GetPrefs()->SetString(
-      limitless::kRailDensityPreference, "comfortable");
+  browser()->GetProfile()->GetPrefs()->SetString(
+      limitless::kRailDensityPref, "comfortable");
   std::optional<limitless::SwiftUITabRailSnapshotForTesting> comfortable;
   ASSERT_TRUE(base::test::RunUntil([&]() {
     comfortable = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
