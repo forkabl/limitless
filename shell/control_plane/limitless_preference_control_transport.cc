@@ -144,6 +144,14 @@ bool ConfigureNonBlockingCloseOnExec(int descriptor) {
          fcntl(descriptor, F_SETFL, status_flags | O_NONBLOCK) == 0;
 }
 
+bool ConfigureCloseOnExecBlocking(int descriptor) {
+  const int descriptor_flags = fcntl(descriptor, F_GETFD);
+  const int status_flags = fcntl(descriptor, F_GETFL);
+  return descriptor_flags >= 0 && status_flags >= 0 &&
+         fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0 &&
+         fcntl(descriptor, F_SETFL, status_flags & ~O_NONBLOCK) == 0;
+}
+
 std::string SerializeParseError(PreferenceRequestParseStatus status) {
   base::DictValue result;
   result.Set("version", kPreferenceControlSchemaVersion);
@@ -384,6 +392,10 @@ void PreferenceControlTransport::AcceptLoop(
         continue;
       }
       break;
+    }
+    if (!ConfigureCloseOnExecBlocking(connection.get())) {
+      shutdown(connection.get(), SHUT_RDWR);
+      continue;
     }
     {
       std::lock_guard lock(accepted_connection_mutex_);
