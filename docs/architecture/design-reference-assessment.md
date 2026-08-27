@@ -2,12 +2,12 @@
 
 ## Decision
 
-Use Arc and Mori as product and interaction references, not as architecture authorities or implicit feature requirements.
+Use Arc and Mori as product and interaction references, not as architecture authorities. `docs/features.md` is the product authority and now explicitly selects the Arc-style sidebar, workspaces, command palette, Peek, split browsing, sharp visual language, fast motion, and related v1 requirements.
 
-- Arc has the higher value as a product-design reference. The user's concrete Arc learnings should be converted into explicit Limitless hypotheses before UI work begins.
+- Arc has the higher value as a product-design reference. The user's concrete Arc learnings should refine the explicit Limitless requirements into measurable behavior.
 - Mori has value as a working macOS interaction study and as evidence that a small team can explore opinionated browser workflows quickly.
 - Do not base Limitless on Mori's window, state, content-hosting, build, or test architecture.
-- Do not infer a vertical sidebar, spaces, automatic tab archiving, command palette, visual style, or other Arc/Mori behavior until the product brief explicitly selects it.
+- Do not infer unlisted Arc or Mori behavior. Implement the behaviors selected in `docs/features.md` and `docs/v1-product-roadmap.md`, then use reference products to sharpen their interaction quality and acceptance criteria.
 
 This separation matters because a good interaction can be reproduced on a safer ownership boundary. Conversely, a visually lean repository can hide a broad and fragile Chromium integration.
 
@@ -27,7 +27,7 @@ The user's Arc experience is primary evidence. Capture each learning in a produc
 | Acceptance evidence | What user journey or prototype result would prove the hypothesis? |
 | v1 priority | Required, candidate, or deferred? |
 
-Candidate discussion areas include navigation organization, durable versus transient tabs, spaces or contexts, command-first operation, sidebar density, Peek-like previews, split views, keyboard behavior, onboarding, archive and recovery, motion, and visual hierarchy. These are prompts for the user, not decisions.
+The product direction now explicitly includes vertical navigation, workspaces, command-first operation, a dense sidebar, Peek, split views, Herdr-like keyboard behavior, gradient themes, fast motion, and a sharp visual hierarchy. Design work should define the detailed behavior and tradeoffs for those selected requirements. Onboarding, automatic archiving, and other unlisted Arc behavior remain proposals until `docs/features.md` selects them.
 
 ## Mori snapshot inspected
 
@@ -122,7 +122,7 @@ Borrow product questions aggressively and implementation patterns selectively:
 
 | Reference | Use it for | Do not use it for |
 | --- | --- | --- |
-| Arc | User problems, interaction principles, information architecture hypotheses, polish bar, and known tradeoffs | Implicit requirements, copied visual identity, or assumed implementation details |
+| Arc | User problems, interaction principles, selected information architecture, polish bar, and known tradeoffs | Requirements beyond `docs/features.md`, copied visual identity, or assumed implementation details |
 | Mori | Concrete macOS interaction experiments, feature discovery, native-behavior test cases, and evidence of prototype velocity | BrowserWindow architecture, authoritative state, content attachment, patch strategy, testing, or release process |
 
-The next design step is a short Arc-learning workshop with the user. It should produce a ranked set of Limitless principles and user journeys before any broad shell layout is implemented. The next engineering step remains the narrow macOS Gate 2 integration proof defined in `decision-record.md`.
+The next design step is to turn the selected product vision into measured interaction specifications and approved pixel references. The next engineering step remains the narrow macOS Gate 2 integration proof defined in `decision-record.md`, including the native SwiftUI comparison now required by the product roadmap.

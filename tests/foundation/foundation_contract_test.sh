@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/testlib.sh"
 VERIFY="$LIMITLESS_ROOT/tools/chromium/verify"
 APPLY_PATCHES="$LIMITLESS_ROOT/tools/chromium/apply-patches"
 CDP_CONTRACT_TEST="$SCRIPT_DIR/cdp_smoke_contract_test.py"
+SWIFT_COMPILER_TEST="$SCRIPT_DIR/compile_mac_swift_test.py"
 EXPECTED_PIN=2b4613f0a24d234b139f1246028239a2f5dde58c
 TEMP_ROOTS=()
 
@@ -34,9 +35,13 @@ require_file "$LIMITLESS_ROOT/chromium.version"
 require_file "$LIMITLESS_ROOT/patches/chromium/manifest.json"
 require_file "$LIMITLESS_ROOT/patches/chromium/series"
 require_file "$CDP_CONTRACT_TEST"
+require_file "$SWIFT_COMPILER_TEST"
 
 PYTHONDONTWRITEBYTECODE=1 python3 "$CDP_CONTRACT_TEST" >/dev/null
 pass "CDP launch smoke validates shell readiness and identity before shutdown"
+PYTHONDONTWRITEBYTECODE=1 python3 "$SWIFT_COMPILER_TEST" >/dev/null
+pass "product-owned Swift header generation is deterministic and fails closed"
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/gate2b_app_contract_test.py" >/dev/null
 
 RECORDED_PIN="$(tr -d '[:space:]' <"$LIMITLESS_ROOT/chromium.version")"
 ACTUAL_PIN="$(git -C "$CHROMIUM_SRC" rev-parse HEAD)"

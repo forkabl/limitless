@@ -2,13 +2,20 @@
 
 ## Purpose
 
-This file is the working brief for continuing development of Limitless with Codex. Treat it as project context, an execution plan, and a set of engineering guardrails.
+This file is supporting architecture and engineering guidance for continuing
+development of Limitless with Codex. `docs/features.md` is the ultimate product
+source of truth and must not be narrowed, replaced, reinterpreted, or edited
+unless Arham explicitly requests it. `docs/v1-product-roadmap.md` orders the
+current work. If this handoff conflicts with either document, reconcile the
+handoff rather than changing the requested product vision.
 
-The immediate objective is not to start changing Chromium UI code. The immediate objective is to inspect the pinned Chromium checkout, map the relevant architecture, and recommend the narrowest durable integration seam for an opinionated Limitless browser UI.
+The original Phase 0 architecture assignment in this file is retained as
+history. Current execution starts from the checked-in roadmap, architecture
+records, patch manifest, and the active repository state.
 
 ## Mission
 
-Build a production-quality, cross-platform desktop browser for macOS, Linux, and Windows that:
+Build a production-quality Apple silicon Mac browser for v1 that:
 
 - uses Chromium as the browser engine and retains its mature browser machinery;
 - presents a fully opinionated Limitless-owned user interface;
@@ -18,6 +25,49 @@ Build a production-quality, cross-platform desktop browser for macOS, Linux, and
 - is tested in the same way an end user experiences it.
 
 Development cost is not the primary decision criterion. Prefer quality, simplicity, robustness, scalability, and long-term maintainability.
+
+Intel Macs, Linux, Windows, Android, and ChromeOS are outside the v1 build,
+test, packaging, and release scope. Retain useful portability evidence and avoid
+unnecessary CPU-specific design, but do not let deferred platform parity block
+or redefine the Apple silicon Mac product.
+
+## Current continuation state
+
+The current bounded product-facing candidate is a BrowserView-hosted SwiftUI
+workspace and tab rail. It projects authoritative Chromium tab state, suppresses
+upstream tab strips for that window, and includes a display-only Agents section
+backed by the current Herdr session. The first Leader milestone is now
+implemented through one controller per eligible normal window. Ctrl+B arms n/p
+for previous and next tab, 1 through 9 for exact indexed tabs, Shift+X for close,
+and b for sidebar visibility; Escape and a two-second timeout cancel the mode.
+
+The same controller serves renderer-originated events, native Views controls,
+and in-process macOS APPLICATION routing. Coverage includes ordinary page
+typing, Cmd+L fallthrough, identical-event deduplication, exact-window
+isolation, popup exclusion, disabled fallback, and armed-window teardown. The
+CLI launch policy enables Leader when
+`--limitless-leader-shortcuts` is absent or set to `enabled`; `disabled` and
+invalid explicit values disable it. This is not a persistent preference, a live
+running-profile settings API, or an authenticated and audited agent-control
+plane.
+
+The presence section still does not authenticate or authorize agents, grant
+browser capabilities, aggregate named Herdr sessions, or prove that every
+visible agent is using Limitless. In-process AppKit routing does not satisfy the
+external hardware-input gate. Exact-window pixels, external accessibility and
+VoiceOver, IME, hardware input, and retained Chromium top-surface acceptance
+remain red. See `docs/v1-product-roadmap.md` and
+`docs/architecture/gate-2b-swiftui-boundary-evidence.md` for the current gate.
+
+The native rail now includes real workspaces and Chromium-owned two-tab splits.
+A clean PRE/post process restart restores three pairs across two workspaces with
+exact product UUID membership, authoritative order, both layouts, 25/50/75
+ratios, selected-page input routing, and hostile product-metadata recovery.
+Limitless persists no split model. The next product-facing priority from
+`docs/features.md` is the remaining hostile split lifecycle: prompt,
+fullscreen, page crash, teardown, private and popup windows, and supported
+cross-window transfer. Do not replace this ordering with the historical phase
+text below when continuing work.
 
 ## Fixed project context
 
@@ -356,7 +406,8 @@ Stop before broad UI work unless a minimal vertical slice proves all of the foll
 - focus can move correctly between shell and page content;
 - native window dragging, resizing, controls, fullscreen, and close behavior work;
 - one accessibility inspection shows meaningful roles, names, focus, and actions;
-- the approach works on at least two platform implementations or has source-backed proof that the third is viable;
+- the approach passes the supported Apple silicon macOS journey and preserves a
+  source-backed boundary that does not gratuitously prevent a future port;
 - patches remain narrow and product logic remains in `limitless/`.
 
 If the seam fails one of these checks, fix or reconsider it before building more UI on top.
@@ -415,36 +466,43 @@ For every journey, define:
 - authoritative Chromium model or service;
 - Limitless presentation and interaction ownership;
 - lifecycle and error states;
-- cross-platform differences;
+- macOS-specific behavior and deferred portability consequences;
 - security and privacy consequences;
 - E2E coverage;
 - whether an upstream patch was added or expanded.
 
-## Phase 4: Platform hardening
+## Phase 4: Apple silicon macOS hardening
 
-Run the same behavioral suite on macOS, Linux, and Windows, then add focused platform coverage for:
+Run the complete behavioral suite on supported Apple silicon Macs, then add
+focused macOS coverage for:
 
 - native window controls, menus, shortcuts, fullscreen, and system dialogs;
-- high-DPI, mixed-DPI multi-monitor, and fractional scaling;
+- Retina and non-Retina mixed-display behavior and scale changes;
 - GPU acceleration and software fallback;
 - IME, dead keys, keyboard layouts, touch, trackpad, mouse, and drag-and-drop;
-- screen readers and platform accessibility inspectors;
+- VoiceOver, Accessibility Inspector, and native AX automation;
 - sleep/wake, display changes, abrupt termination, crash recovery, and relaunch;
 - installation, upgrade, profile-directory handling, and uninstall expectations;
 - code signing, notarization, packaging, and update infrastructure when those enter scope.
 
 Do not declare platform support based only on successful compilation.
 
-## STOP/RETHINK GATE 4: Cross-platform parity
+## STOP/RETHINK GATE 4: Supported-Mac quality
 
-Stop before release hardening if any supported platform is becoming a second-class port. Reconsider abstractions if:
+Stop before release hardening if the Apple silicon Mac app cannot meet the
+declared behavioral, accessibility, security, performance, and visual bar.
+Reconsider abstractions if:
 
 - shared code contains growing platform-condition branches;
-- a platform requires a separate product interaction model without an explicit decision;
-- accessibility differs materially across platforms;
+- macOS requires a separate product interaction model without an explicit decision;
+- accessibility differs materially across supported macOS versions or hardware;
 - window behavior is emulated poorly instead of using appropriate native integration;
 - failures cannot be reproduced and tested consistently;
-- a feature requires unsafe or unmaintainable upstream changes on one platform.
+- a feature requires unsafe or unmaintainable upstream changes on macOS.
+
+Linux and Windows hardening becomes a separate owner-approved project only if
+either platform enters product scope. Existing portability research is evidence,
+not a v1 acceptance gate.
 
 ## Phase 5: Chromium update and release discipline
 
@@ -455,9 +513,9 @@ For every Chromium revision update:
 1. Record old and new full SHAs.
 2. Review upstream security and breaking changes relevant to touched subsystems.
 3. Apply the patch series with explicit failure on drift.
-4. Build all supported platforms.
+4. Build the supported Apple silicon macOS configurations.
 5. Run unit, integration, browser, and E2E suites.
-6. Manually inspect critical UI journeys on all platforms.
+6. Manually inspect critical UI journeys on supported Macs.
 7. Update architecture maps when ownership or seams change.
 8. Record patch additions, removals, and conflict causes.
 9. Rehearse profile and session compatibility where relevant.
@@ -579,7 +637,10 @@ For each meaningful work session, report:
 
 Do not say a phase is complete when only source code exists. Completion requires its declared tests, visual inspection, documentation, and gate criteria.
 
-## First Codex assignment
+## Historical first Codex assignment
+
+This assignment is complete and retained only to explain the origin of the
+architecture documents. It is not the current continuation objective.
 
 Start with Phase 0 only.
 
@@ -593,7 +654,7 @@ Start with Phase 0 only.
 
 Do not begin broad implementation, switch Chromium revisions, or make large upstream patches during this assignment.
 
-## First-session completion checklist
+## Historical first-session completion checklist
 
 Phase 0 is ready for review only when:
 

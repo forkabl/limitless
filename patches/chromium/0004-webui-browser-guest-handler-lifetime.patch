@@ -1,0 +1,302 @@
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_page_handler.cc b/chrome/browser/ui/webui_browser/webui_browser_page_handler.cc
+index f86103d5379078a34a7e8ae7b9ea7c92f7018693..109ed11d53459a91a69c329c3f3a3c0acbe4e965 100644
+--- a/chrome/browser/ui/webui_browser/webui_browser_page_handler.cc
++++ b/chrome/browser/ui/webui_browser/webui_browser_page_handler.cc
+@@ -4,9 +4,13 @@
+ 
+ #include "chrome/browser/ui/webui_browser/webui_browser_page_handler.h"
+ 
++#include <optional>
++
++#include "base/callback_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/logging.h"
++#include "base/memory/raw_ptr.h"
+ #include "base/notimplemented.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "base/mac/mac_util.h"
+@@ -33,17 +37,22 @@
+ #include "components/guest_contents/browser/guest_contents_handle.h"
+ #include "components/omnibox/browser/location_bar_model.h"
+ #include "components/omnibox/browser/vector_icons.h"
++#include "components/sessions/core/session_id.h"
++#include "components/tabs/public/tab_interface.h"
+ #include "components/vector_icons/vector_icons.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/web_contents.h"
+ #include "ui/base/interaction/element_tracker.h"
+ #include "ui/base/ui_base_features.h"
+ #include "ui/gfx/vector_icon_types.h"
++#include "ui/views/bubble/bubble_anchor.h"
+ #include "ui/views/controls/menu/menu_model_adapter.h"
+ #include "ui/views/controls/menu/menu_runner.h"
+ #include "ui/views/interaction/element_tracker_views.h"
++#include "ui/views/widget/widget.h"
+ 
+ class WebUIBrowserGuestHandler
+     : public content::DocumentService<webui_browser::mojom::GuestHandler> {
+@@ -51,64 +60,172 @@ class WebUIBrowserGuestHandler
+   WebUIBrowserGuestHandler(
+       content::RenderFrameHost& render_frame_host,
+       mojo::PendingReceiver<webui_browser::mojom::GuestHandler> receiver,
+-      content::WebContents* web_contents,
+-      WebUIBrowserWindow* window)
++      tabs::TabInterface* tab,
++      base::WeakPtr<WebUIBrowserUI> controller)
+       : content::DocumentService<webui_browser::mojom::GuestHandler>(
+             render_frame_host,
+             std::move(receiver)),
+-        window_(window),
+-        web_contents_(web_contents->GetWeakPtr()) {}
++        tab_handle_(tab->GetHandle()),
++        bound_web_contents_(tab->GetContents()->GetWeakPtr()),
++        owner_session_id_(controller->browser()->GetSessionID()),
++        controller_(std::move(controller)),
++        tab_will_detach_subscription_(tab->RegisterWillDetach(
++            base::BindRepeating(&WebUIBrowserGuestHandler::OnTabWillDetach,
++                                base::Unretained(this)))),
++        tab_will_discard_contents_subscription_(
++            tab->RegisterWillDiscardContents(base::BindRepeating(
++                &WebUIBrowserGuestHandler::OnTabWillDiscardContents,
++                base::Unretained(this)))),
++        browser_did_close_subscription_(
++            controller_->browser()->RegisterBrowserDidClose(base::BindRepeating(
++                &WebUIBrowserGuestHandler::OnBrowserDidClose,
++                base::Unretained(this)))) {}
+   WebUIBrowserGuestHandler(const WebUIBrowserGuestHandler&) = delete;
+   WebUIBrowserGuestHandler& operator=(const WebUIBrowserGuestHandler&) = delete;
+   ~WebUIBrowserGuestHandler() override = default;
+ 
+  private:
++  struct AuthorizedTab {
++    raw_ptr<Browser> browser;
++    raw_ptr<WebUIBrowserWindow> window;
++    raw_ptr<content::WebContents> contents;
++  };
++
++  std::optional<AuthorizedTab> ResolveAuthorizedTab() {
++    if (!controller_) {
++      ResetAndDeleteThis();
++      return std::nullopt;
++    }
++
++    Browser* const browser = controller_->browser();
++    WebUIBrowserWindow* const window = controller_->browser_window();
++    tabs::TabInterface* const tab = tab_handle_.Get();
++    if (!browser || !window || browser->IsDeleteScheduled() || !tab ||
++        browser->GetSessionID() != owner_session_id_ ||
++        tab->GetProfile() != browser->GetProfile() ||
++        tab->GetBrowserWindowInterface() != browser ||
++        browser->GetTabStripModel()->GetIndexOfTab(tab) ==
++            TabStripModel::kNoTab) {
++      ResetAndDeleteThis();
++      return std::nullopt;
++    }
++
++    content::WebContents* const contents = tab->GetContents();
++    if (!contents || contents != bound_web_contents_.get()) {
++      ResetAndDeleteThis();
++      return std::nullopt;
++    }
++    return AuthorizedTab{browser, window, contents};
++  }
++
++  void OnTabWillDetach(tabs::TabInterface*, tabs::TabInterface::DetachReason) {
++    ResetAndDeleteThis();
++  }
++
++  void OnTabWillDiscardContents(tabs::TabInterface*,
++                                content::WebContents*,
++                                content::WebContents*) {
++    ResetAndDeleteThis();
++  }
++
++  void OnBrowserDidClose(BrowserWindowInterface*) { ResetAndDeleteThis(); }
++
+   // webui_browser::mojom::GuestHandler
+   void Navigate(const GURL& src) override {
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
+     content::NavigationController::LoadURLParams load_url_params(src);
+-    web_contents_->GetController().LoadURLWithParams(load_url_params);
++    authorized_tab->contents->GetController().LoadURLWithParams(
++        load_url_params);
+   }
+ 
+   void CanGoBack(CanGoBackCallback callback) override {
+-    if (!web_contents_.get()) {
+-      std::move(callback).Run(/*can_go_back=*/false);
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
+       return;
+     }
+-    std::move(callback).Run(web_contents_->GetController().CanGoBack());
++    std::move(callback).Run(
++        authorized_tab->contents->GetController().CanGoBack());
+   }
+ 
+   void GoBack() override {
+-    if (web_contents_->GetController().CanGoBack()) {
+-      web_contents_->GetController().GoBack();
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
++    if (authorized_tab->contents->GetController().CanGoBack()) {
++      authorized_tab->contents->GetController().GoBack();
+     }
+   }
+ 
+   void CanGoForward(CanGoForwardCallback callback) override {
+-    if (!web_contents_.get()) {
+-      std::move(callback).Run(/*can_go_forward=*/false);
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
+       return;
+     }
+-    std::move(callback).Run(web_contents_->GetController().CanGoForward());
++    std::move(callback).Run(
++        authorized_tab->contents->GetController().CanGoForward());
+   }
+ 
+   void GoForward() override {
+-    if (web_contents_->GetController().CanGoForward()) {
+-      web_contents_->GetController().GoForward();
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
++    if (authorized_tab->contents->GetController().CanGoForward()) {
++      authorized_tab->contents->GetController().GoForward();
+     }
+   }
+ 
+   void Reload() override {
+-    web_contents_->GetController().Reload(content::ReloadType::NORMAL, true);
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
++    authorized_tab->contents->GetController().Reload(
++        content::ReloadType::NORMAL, true);
+   }
+ 
+-  void StopLoading() override { web_contents_->Stop(); }
++  void StopLoading() override {
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
++    authorized_tab->contents->Stop();
++  }
+ 
+   void OpenPageInfoMenu() override {
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
++    if (authorized_tab->browser->GetTabStripModel()->GetActiveWebContents() !=
++        authorized_tab->contents) {
++      return;
++    }
++
++    content::NavigationEntry* const entry =
++        authorized_tab->contents->GetController().GetVisibleEntry();
++    LocationBar* const location_bar = authorized_tab->window->GetLocationBar();
++    views::Widget* const widget = authorized_tab->window->widget();
++    if (!entry || entry->IsInitialEntry() || !location_bar || !widget ||
++        !widget->GetContentsView() ||
++        !authorized_tab->window->GetNativeWindow()) {
++      return;
++    }
++    std::optional<bubble_anchor_util::AnchorConfiguration> chip_anchor =
++        location_bar->GetChipAnchor();
++    views::BubbleAnchor anchor =
++        chip_anchor && chip_anchor->anchor
++            ? chip_anchor->anchor
++            : views::BubbleAnchor(widget->GetContentsView());
++
+     std::unique_ptr<PageInfoBubbleSpecification> specification =
+         PageInfoBubbleSpecification::Builder(
+-            window_->GetLocationBar()->GetChipAnchor()->anchor,
+-            window_->GetNativeWindow(), web_contents_.get(),
+-            web_contents_->GetLastCommittedURL())
++            anchor, authorized_tab->window->GetNativeWindow(),
++            authorized_tab->contents, entry->GetVirtualURL())
+             .Build();
+ 
+     views::BubbleDialogDelegateView* const bubble =
+@@ -117,8 +234,20 @@ class WebUIBrowserGuestHandler
+   }
+ 
+   void GetSecurityIcon(GetSecurityIconCallback callback) override {
+-    auto* icon = &window_->browser()
+-                      ->GetFeatures()
++    std::optional<AuthorizedTab> authorized_tab = ResolveAuthorizedTab();
++    if (!authorized_tab) {
++      return;
++    }
++    if (authorized_tab->browser->GetTabStripModel()->GetActiveWebContents() !=
++        authorized_tab->contents) {
++      // The active webview can change while this request is in flight. Return
++      // a conservative value without exposing the new active tab's identity or
++      // revoking an otherwise valid capability.
++      std::move(callback).Run(
++          webui_browser::mojom::SecurityIcon::NotSecureWarningChromeRefresh);
++      return;
++    }
++    auto* icon = &authorized_tab->browser->GetFeatures()
+                       .location_bar_model()
+                       ->GetVectorIcon();
+     webui_browser::mojom::SecurityIcon icon_type;
+@@ -162,18 +291,25 @@ class WebUIBrowserGuestHandler
+                              : omnibox::kOfflinePinOldIcon)) {
+       icon_type = webui_browser::mojom::SecurityIcon::OfflinePin;
+     } else {
+-      CHECK(false) << "Add new icon to webui_browsers's browser.mojom and "
+-                   << "app.ts and icons.html.ts.";
++      DLOG(ERROR) << "Unknown WebUI Browser security icon; using the "
++                     "not-secure warning icon.";
++      icon_type =
++          webui_browser::mojom::SecurityIcon::NotSecureWarningChromeRefresh;
+     }
+     std::move(callback).Run(icon_type);
+   }
+ 
+-  raw_ptr<WebUIBrowserWindow> window_;
+-
+-  // The WebContents is destroyed before document
+-  // services, causing a raw_ptr of WebContents dangling here, so use a weak
+-  // ptr instead.
+-  base::WeakPtr<content::WebContents> web_contents_;
++  const tabs::TabHandle tab_handle_;
++
++  // The returned guest id is bound to this WebContents. A discard replaces
++  // the contents, so the old capability is revoked and the shell must request
++  // a new guest id for the still-live tab handle.
++  const base::WeakPtr<content::WebContents> bound_web_contents_;
++  const SessionID owner_session_id_;
++  const base::WeakPtr<WebUIBrowserUI> controller_;
++  base::CallbackListSubscription tab_will_detach_subscription_;
++  base::CallbackListSubscription tab_will_discard_contents_subscription_;
++  base::CallbackListSubscription browser_did_close_subscription_;
+ };
+ 
+ WebUIBrowserPageHandler::~WebUIBrowserPageHandler() = default;
+@@ -219,8 +355,8 @@ void WebUIBrowserPageHandler::GetGuestIdForTabId(
+   }
+ 
+   // The RenderFrameHost takes ownership of this object via the DocumentService.
+-  new WebUIBrowserGuestHandler(render_frame_host(), std::move(receiver),
+-                               tab_contents, GetBrowserWindow());
++  new WebUIBrowserGuestHandler(render_frame_host(), std::move(receiver), tab,
++                               controller_->GetWeakPtr());
+ 
+   guest_contents::GuestContentsHandle::CreateForWebContents(tab_contents);
+   auto* guest_handle =

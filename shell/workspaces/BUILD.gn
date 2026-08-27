@@ -1,0 +1,47 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+config("workspace_public") {
+  include_dirs = [ "." ]
+}
+
+source_set("core") {
+  sources = [
+    "limitless_workspace_controller.cc",
+    "limitless_workspace_controller.h",
+  ]
+
+  public_deps = [
+    "//base",
+    "//chrome/browser/tab_list",
+    "//chrome/browser/ui/browser_window",
+    "//components/tabs:public",
+  ]
+  public_configs = [ ":workspace_public" ]
+
+  deps = [
+    "//chrome/browser/profiles",
+    "//chrome/common",
+    "//components/split_tabs",
+    "//content/public/browser",
+    "//url",
+  ]
+}
+
+source_set("session_persistence") {
+  sources = [
+    "limitless_workspace_session_persistence.cc",
+    "limitless_workspace_session_persistence.h",
+  ]
+
+  public_deps = [ ":core" ]
+
+  deps = [
+    "//base",
+    "//chrome/browser/profiles",
+    "//chrome/browser/sessions",
+    "//components/sessions",
+    "//content/public/browser",
+  ]
+}

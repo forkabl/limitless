@@ -1,0 +1,147 @@
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index d871f0ce557d2a7f13f6327ba8b606038547472a..1369e93b0c9f10c0e86ea3eda38d5b258114e403 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -946,7 +946,8 @@ BrowserView::BrowserView(Browser* browser)
+ 
+ #if BUILDFLAG(IS_MAC) && defined(LIMITLESS_SWIFTUI_BOUNDARY_PROBE)
+   if (browser_->GetType() == BrowserWindowInterface::TYPE_NORMAL) {
+-    auto limitless_swiftui_rail = limitless::MaybeCreateSwiftUIBoundaryProbe();
++    auto limitless_swiftui_rail =
++        limitless::MaybeCreateSwiftUITabRail(browser_.get());
+     if (limitless_swiftui_rail) {
+       limitless_swiftui_rail_ = AddChildView(std::move(limitless_swiftui_rail));
+     }
+@@ -971,8 +972,12 @@ BrowserView::BrowserView(Browser* browser)
+ 
+   // Tabstrip comes basically last because it should be before toolbar in the
+   // focus order but also needs to paint on top of everything.
++  std::unique_ptr<TabStripRegionView> horizontal_tab_strip_region_view =
++      limitless_swiftui_rail_
++          ? std::make_unique<HorizontalTabStripRegionViewNew>(this)
++          : CreateHorizontalTabStripRegionView(this);
+   horizontal_tab_strip_region_view_ =
+-      AddChildView(CreateHorizontalTabStripRegionView(this));
++      AddChildView(std::move(horizontal_tab_strip_region_view));
+   horizontal_tab_strip_region_insertion_index_ =
+       GetIndexOf(horizontal_tab_strip_region_view_.get());
+ 
+@@ -1009,7 +1014,7 @@ BrowserView::BrowserView(Browser* browser)
+     vertical_tab_strip_bottom_corner_->SetProperty(
+         views::kElementIdentifierKey,
+         BrowserViewLayoutViews::kVerticalTabStripBottomCornerElementId);
+-  } else {
++  } else if (!limitless_swiftui_rail_) {
+     horizontal_tab_strip_region_view_->InitializeTabStrip();
+   }
+ 
+@@ -1140,6 +1145,7 @@ BrowserView::~BrowserView() {
+   find_bar_host_view_ = nullptr;
+   infobar_container_ = nullptr;
+   multi_contents_view_ = nullptr;
++  limitless_swiftui_rail_ = nullptr;
+   main_shadow_overlay_ = nullptr;
+   window_scrim_view_ = nullptr;
+   side_panel_content_transition_scrim_view_ = nullptr;
+@@ -1318,6 +1324,9 @@ views::View* BrowserView::contents_container() {
+ }
+ 
+ TabStripRegionView* BrowserView::tab_strip_view() const {
++  if (limitless_swiftui_rail_) {
++    return horizontal_tab_strip_region_view_.get();
++  }
+   auto* controller = tabs::VerticalTabStripStateController::From(browser_);
+   if (vertical_tab_strip_region_view_ && controller &&
+       controller->ShouldDisplayVerticalTabs()) {
+@@ -1585,12 +1594,14 @@ void BrowserView::OnVerticalTabStripModeChanged(
+         std::move(selection_state));
+   }
+ 
+-  if (controller->ShouldDisplayVerticalTabs()) {
+-    horizontal_tab_strip_region_view_->ResetTabStrip();
+-    vertical_tab_strip_region_view_->InitializeTabStrip();
+-  } else {
+-    vertical_tab_strip_region_view_->ResetTabStrip();
+-    horizontal_tab_strip_region_view_->InitializeTabStrip();
++  if (!limitless_swiftui_rail_) {
++    if (controller->ShouldDisplayVerticalTabs()) {
++      horizontal_tab_strip_region_view_->ResetTabStrip();
++      vertical_tab_strip_region_view_->InitializeTabStrip();
++    } else {
++      vertical_tab_strip_region_view_->ResetTabStrip();
++      horizontal_tab_strip_region_view_->InitializeTabStrip();
++    }
+   }
+ 
+   GetFrameView()->OnTabStripStateChanged();
+@@ -3706,9 +3717,13 @@ std::u16string BrowserView::GetAccessibleWindowTitleForChannelAndProfile(
+   int active_index = browser_->GetTabStripModel()->active_index();
+   std::u16string title;
+   if (active_index > -1) {
+-    title = tabs::GetAccessibleTabLabel(
+-        browser_->GetTabStripModel()->GetActiveTab(),
+-        /*is_for_tab=*/false);
++    tabs::TabInterface* active_tab =
++        browser_->GetTabStripModel()->GetActiveTab();
++    title = limitless_swiftui_rail_
++                ? WindowMetadataController::From(browser_.get())
++                      ->GetWindowTitleForTab(active_tab->GetHandle())
++                : tabs::GetAccessibleTabLabel(active_tab,
++                                              /*is_for_tab=*/false);
+   } else {
+     title = WindowMetadataController::From(browser_.get())
+                 ->GetWindowTitleForCurrentTab(false /* include_app_name */);
+@@ -4486,10 +4501,10 @@ void BrowserView::GetAccessiblePanes(std::vector<views::View*>* panes) {
+ 
+   panes->push_back(
+       ToolbarButtonProvider::From(browser_)->GetAsAccessiblePaneView());
+-  if (horizontal_tab_strip_region_view_) {
++  if (horizontal_tab_strip_region_view_ && !limitless_swiftui_rail_) {
+     panes->push_back(horizontal_tab_strip_region_view_);
+   }
+-  if (vertical_tab_strip_region_view_) {
++  if (vertical_tab_strip_region_view_ && !limitless_swiftui_rail_) {
+     panes->push_back(vertical_tab_strip_region_view_);
+   }
+   if (limitless_swiftui_rail_) {
+@@ -5128,12 +5143,14 @@ void BrowserView::AddedToWidget() {
+     }
+   }
+ 
+-  if (auto* const vertical_tab_strip_state_controller =
+-          tabs::VerticalTabStripStateController::From(browser_)) {
+-    if (vertical_tab_strip_state_controller->ShouldDisplayVerticalTabs()) {
+-      vertical_tab_strip_region_view_->InitializeTabStrip();
+-    } else {
+-      horizontal_tab_strip_region_view_->InitializeTabStrip();
++  if (!limitless_swiftui_rail_) {
++    if (auto* const vertical_tab_strip_state_controller =
++            tabs::VerticalTabStripStateController::From(browser_)) {
++      if (vertical_tab_strip_state_controller->ShouldDisplayVerticalTabs()) {
++        vertical_tab_strip_region_view_->InitializeTabStrip();
++      } else {
++        horizontal_tab_strip_region_view_->InitializeTabStrip();
++      }
+     }
+   }
+ 
+@@ -6064,6 +6081,9 @@ void BrowserView::FrameColorsChanged() {
+ }
+ 
+ void BrowserView::UpdateAccessibleNameForAllTabs() {
++  if (limitless_swiftui_rail_) {
++    return;
++  }
+   for (int i = 0; i < browser()->GetTabStripModel()->count(); ++i) {
+     UpdateAccessibleNameForTabAt(i);
+   }
+@@ -6072,6 +6092,9 @@ void BrowserView::UpdateAccessibleNameForAllTabs() {
+ // TODO(crbug.com/529834985): See if we can consolidate the logic here and in
+ // TabView::UpdateAccessibleName/TabView::UpdateAccessibleName.
+ void BrowserView::UpdateAccessibleNameForTabAt(int index) {
++  if (limitless_swiftui_rail_) {
++    return;
++  }
+   tabs::TabInterface* tab_interface =
+       browser()->GetTabStripModel()->GetTabAtIndex(index);
+   std::u16string accessible_title =

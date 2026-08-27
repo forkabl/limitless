@@ -24,6 +24,12 @@ from _common import (
 
 
 DEFAULT_BROWSER_FILTER = (
+    "LimitlessSwiftUIBrowserTest.*:LimitlessSwiftUIBrowserUnifiedTest.*:"
+    "LimitlessSwiftUIHerdrBrowserTest.*:"
+    "LimitlessSwiftUIBrowserDisabledTest.*:"
+    "LimitlessSwiftUILeaderDisabledBrowserTest.*:"
+    "HerdrAgentProviderTest.*:HerdrAgentProviderProcessTest.*:"
+    "AgentPresenceRegistryTest.*:"
     "LimitlessWebUIBrowserTest.*:WebUIBrowserTest.*:"
     "WebUIBrowserSurfaceEmbedPixelTest.*"
 )
