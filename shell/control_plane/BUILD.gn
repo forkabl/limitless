@@ -76,6 +76,7 @@ source_set("running_profile_control_registry") {
   public_configs = [ ":preference_control_public" ]
 
   deps = [
+    "../commands:command_window_registry",
     "//chrome/browser/profiles",
     "//chrome/browser/ui/browser_window",
   ]
