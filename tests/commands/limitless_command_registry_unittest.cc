@@ -480,6 +480,44 @@ TEST(ProductCommandWindowBindingTest, WeakPointerInvalidatesAfterDestruction) {
   EXPECT_FALSE(weak);
 }
 
+TEST(ProductCommandWindowBindingTest, ExpiredRegistryFailsClosed) {
+  int guards = 0;
+  int executes = 0;
+  auto registry = std::make_unique<ProductCommandRegistry>(
+      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++executes;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+  ProductCommandWindowBinding binding(
+      registry->GetWeakPtr(),
+      base::BindLambdaForTesting(
+          []() -> std::optional<ProductCommandWindowState> {
+            return ProductCommandWindowState{.window_id = kWindowId};
+          }));
+  registry.reset();
+  ProductCommandInvocation invocation{.command = ProductCommandId::kTabsNext};
+  EXPECT_EQ(ProductCommandQueryStatus::kDisabled,
+            binding.Query(invocation).status);
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kPreconditionFailed,
+      binding
+          .ExecuteGuarded(
+              invocation, ProductCommandOrigin::kExternal,
+              base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+                ++guards;
+                return ProductCommandPreExecuteDecision::kAllow;
+              }))
+          .status);
+  EXPECT_EQ(0, guards);
+  EXPECT_EQ(0, executes);
+}
+
 TEST(LimitlessCommandRegistryTest, LiveRequeryRejectsChangedState) {
   bool enabled = true;
   int guards = 0;
