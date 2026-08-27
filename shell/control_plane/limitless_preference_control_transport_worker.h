@@ -6,6 +6,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -14,7 +15,9 @@
 #include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
 #include "base/sequence_checker.h"
+#include "base/synchronization/condition_variable.h"
 #include "base/synchronization/lock.h"
+#include "base/time/time.h"
 
 namespace limitless {
 
@@ -23,15 +26,35 @@ struct ArtifactIdentity {
   ino_t ino = 0;
 };
 
+class PendingRequest : public base::RefCountedThreadSafe<PendingRequest> {
+ public:
+  PendingRequest();
+  bool Complete(std::string response);
+  void Cancel();
+  bool WaitUntil(base::TimeTicks deadline, std::string* response);
+
+ private:
+  friend class base::RefCountedThreadSafe<PendingRequest>;
+  ~PendingRequest();
+  base::Lock lock_;
+  base::ConditionVariable cv_{&lock_};
+  std::optional<std::string> response_;
+  bool cancelled_ = false;
+};
+
 struct TransportCancellationState
     : public base::RefCountedThreadSafe<TransportCancellationState> {
   TransportCancellationState();
   void Cancel();
   void InstallWriter(int fd);
   void ClearWriter();
+  void InstallActive(int fd, scoped_refptr<PendingRequest> request);
+  void ClearActive(int fd, scoped_refptr<PendingRequest> request);
   std::atomic<bool> cancelled{false};
   base::Lock lock;
   base::ScopedFD writer_fd;
+  int active_fd = -1;
+  scoped_refptr<PendingRequest> active_request;
 
  private:
   friend class base::RefCountedThreadSafe<TransportCancellationState>;

@@ -251,12 +251,37 @@ PublishResult WritePrivateFileNoReplaceAt(
 
 namespace limitless {
 
+PendingRequest::PendingRequest() = default;
+PendingRequest::~PendingRequest() = default;
+bool PendingRequest::Complete(std::string response) {
+  base::AutoLock lock(lock_);
+  if (cancelled_ || response_) return false;
+  response_ = std::move(response); cv_.Broadcast(); return true;
+}
+void PendingRequest::Cancel() { base::AutoLock lock(lock_); cancelled_ = true; cv_.Broadcast(); }
+bool PendingRequest::WaitUntil(base::TimeTicks deadline, std::string* response) {
+  base::AutoLock lock(lock_);
+  while (!response_ && !cancelled_) {
+    base::TimeDelta remaining = deadline - base::TimeTicks::Now();
+    if (remaining <= base::TimeDelta()) break;
+    cv_.TimedWait(remaining);
+  }
+  if (!response_) return false;
+  *response = *response_; return true;
+}
+
 TransportCancellationState::TransportCancellationState() = default;
 TransportCancellationState::~TransportCancellationState() = default;
 
 void TransportCancellationState::Cancel() {
   cancelled.store(true, std::memory_order_release);
   base::AutoLock guard(lock);
+  if (active_fd >= 0) {
+    shutdown(active_fd, SHUT_RDWR);
+  }
+  if (active_request) {
+    active_request->Cancel();
+  }
   if (writer_fd.is_valid()) {
     const char byte = 0;
     for (;;) {
@@ -286,6 +311,32 @@ void TransportCancellationState::InstallWriter(int fd) {
 void TransportCancellationState::ClearWriter() {
   base::AutoLock guard(lock);
   writer_fd.reset();
+}
+
+void TransportCancellationState::InstallActive(
+    int fd,
+    scoped_refptr<PendingRequest> request) {
+  base::AutoLock guard(lock);
+  active_fd = fd;
+  active_request = std::move(request);
+  if (cancelled.load(std::memory_order_acquire)) {
+    if (active_fd >= 0) {
+      shutdown(active_fd, SHUT_RDWR);
+    }
+    if (active_request) {
+      active_request->Cancel();
+    }
+  }
+}
+
+void TransportCancellationState::ClearActive(
+    int fd,
+    scoped_refptr<PendingRequest> request) {
+  base::AutoLock guard(lock);
+  if (active_fd == fd && active_request == request) {
+    active_fd = -1;
+    active_request.reset();
+  }
 }
 
 PreferenceControlTransportWorker::PreferenceControlTransportWorker(
