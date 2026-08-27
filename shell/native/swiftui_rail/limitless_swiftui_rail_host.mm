@@ -831,21 +831,45 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   }
 
   std::optional<ProductCommandWindowState> QueryProductWindowState() const {
-    if (!browser_window_ || !workspace_controller_ ||
-        browser_window_->IsDeleteScheduled()) {
+    if (!browser_window_ || !workspace_controller_ || !tab_list_ ||
+        browser_window_->IsDeleteScheduled() || tab_list_->IsClosingAllTabs()) {
       return std::nullopt;
     }
     const WorkspaceWindowSnapshot workspace =
         workspace_controller_->GetSnapshot();
+    if (!workspace.enabled || workspace.session_restore_in_progress ||
+        workspace.visible_tabs.size() !=
+            workspace.visible_tab_projections.size()) {
+      return std::nullopt;
+    }
+    const auto canonical = [](const std::string& value) {
+      const base::Uuid uuid = base::Uuid::ParseLowercase(value);
+      return uuid.is_valid() && uuid.AsLowercaseString() == value;
+    };
+    if (!canonical(workspace.window_identifier) ||
+        !workspace.active_workspace_identifier ||
+        !canonical(*workspace.active_workspace_identifier)) {
+      return std::nullopt;
+    }
     ProductCommandWindowState state;
     state.window_id = workspace.window_identifier;
     state.active_workspace_id = workspace.active_workspace_identifier;
+    std::set<std::string> tab_ids;
+    std::set<int32_t> tab_handles;
     for (const WorkspaceTabProjection& tab :
          workspace.visible_tab_projections) {
+      if (!canonical(tab.identifier) ||
+          !tab_ids.insert(tab.identifier).second ||
+          !tab_handles.insert(tab.handle.raw_value()).second) {
+        return std::nullopt;
+      }
       state.visible_tab_ids.push_back(tab.identifier);
       if (workspace.active_tab == tab.handle) {
         state.active_tab_id = tab.identifier;
       }
+    }
+    if (!state.active_tab_id) {
+      return std::nullopt;
     }
     state.is_active = browser_window_->IsActive();
     if (split_controller_) {

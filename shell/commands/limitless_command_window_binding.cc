@@ -43,6 +43,7 @@ ProductCommandExecutionResult ProductCommandWindowBinding::ExecuteGuarded(
     const ProductCommandInvocation& invocation,
     ProductCommandOrigin origin,
     ProductCommandRegistry::PreExecuteGuard guard) const {
+  CHECK(guard);
   base::WeakPtr<ProductCommandRegistry> registry = registry_;
   return registry
              ? registry->ExecuteGuarded(invocation, origin, std::move(guard))
