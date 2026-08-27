@@ -137,8 +137,8 @@ IN_PROC_BROWSER_TEST_F(LimitlessProfilePreferenceBackendBrowserTest,
   const base::ListValue& records =
       profile->GetPrefs()->GetList(kPreferenceAuditRecordsPref);
   ASSERT_EQ(256u, records.size());
-  EXPECT_EQ(5, records.front().GetDict().FindInt("sequence"));
-  EXPECT_EQ(260, records.back().GetDict().FindInt("sequence"));
+  EXPECT_EQ("5", records.front().GetDict().FindString("sequence"));
+  EXPECT_EQ("260", records.back().GetDict().FindString("sequence"));
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessProfilePreferenceBackendBrowserTest,
