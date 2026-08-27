@@ -111,6 +111,7 @@
 #include "net/test/embedded_test_server/http_request.h"
 #include "net/test/embedded_test_server/http_response.h"
 #include "shell/agents/herdr_agent_provider.h"
+#include "shell/commands/limitless_command_registry.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/accelerators/test_accelerator_target.h"
@@ -1154,6 +1155,342 @@ IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
   const std::u16string accessible_window_title =
       browser_view->GetAccessibleWindowTitle();
   EXPECT_NE(std::u16string::npos, accessible_window_title.find(u"Rail Three"));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    ProductCommandRegistryRoutesTabsSidebarAndLeaderFromLiveState) {
+  ASSERT_EQ(11u, limitless::GetProductCommandDescriptors().size());
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/one")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/two"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  ASSERT_EQ(2, tab_strip->count());
+  tabs::TabInterface* one = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* two = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(one);
+  ASSERT_TRUE(two);
+  const tabs::TabHandle two_handle = two->GetHandle();
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(WaitForRailTabs(rail, 2));
+  ASSERT_EQ(one, tab_strip->GetActiveTab());
+
+  const limitless::ProductCommandInvocation next{
+      .command = limitless::ProductCommandId::kTabsNext};
+  const limitless::ProductCommandInvocation previous{
+      .command = limitless::ProductCommandId::kTabsPrevious};
+  const limitless::ProductCommandInvocation select_two{
+      .command = limitless::ProductCommandId::kTabsSelectIndex,
+      .arguments = limitless::ProductCommandTabIndex{.one_based_index = 2}};
+  const limitless::ProductCommandInvocation select_nine{
+      .command = limitless::ProductCommandId::kTabsSelectIndex,
+      .arguments = limitless::ProductCommandTabIndex{.one_based_index = 9}};
+  const limitless::ProductCommandInvocation close_active{
+      .command = limitless::ProductCommandId::kTabsCloseActive};
+  const limitless::ProductCommandInvocation toggle_sidebar{
+      .command = limitless::ProductCommandId::kSidebarToggle};
+
+  for (const limitless::ProductCommandInvocation* invocation :
+       {&next, &previous, &select_two, &close_active, &toggle_sidebar}) {
+    EXPECT_EQ(
+        limitless::ProductCommandQueryStatus::kEnabled,
+        limitless::QuerySwiftUIProductCommandForTesting(browser(), *invocation)
+            .status);
+  }
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kDisabled,
+      limitless::QuerySwiftUIProductCommandForTesting(browser(), select_nine)
+          .status);
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kDisabled,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), select_nine)
+          .status);
+  EXPECT_EQ(2, tab_strip->count());
+  EXPECT_EQ(one, tab_strip->GetActiveTab());
+
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(), next)
+                .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == two; }));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return two->GetContents() &&
+           two->GetContents()->GetRenderWidgetHostView() &&
+           two->GetContents()->GetRenderWidgetHostView()->HasFocus();
+  }));
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), previous)
+          .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == one; }));
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), select_two)
+          .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == two; }));
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), previous)
+          .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == one; }));
+
+  SendRendererKey(browser(), ui::VKEY_B, ui::EF_CONTROL_DOWN);
+  ASSERT_TRUE(WaitForCondition([&]() { return IsLeaderArmed(rail); }));
+  SendRendererKey(browser(), ui::VKEY_N, ui::EF_NONE, u'n');
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return tab_strip->GetActiveTab() == two && !IsLeaderArmed(rail);
+  }));
+
+  ASSERT_TRUE(rail->GetVisible());
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(),
+                                                              toggle_sidebar)
+                .status);
+  EXPECT_FALSE(rail->GetVisible());
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kEnabled,
+      limitless::QuerySwiftUIProductCommandForTesting(browser(), toggle_sidebar)
+          .status);
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(),
+                                                              toggle_sidebar)
+                .status);
+  EXPECT_TRUE(rail->GetVisible());
+
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), close_active)
+          .status);
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return tab_strip->count() == 1 && !two_handle.Get(); }));
+  EXPECT_EQ(one, tab_strip->GetActiveTab());
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
+                       ProductCommandRegistryExecutesExactNativeSplitSequence) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/one")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/two"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  tabs::TabInterface* one = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* two = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(one);
+  ASSERT_TRUE(two);
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  const auto snapshot = WaitForRailTabs(rail, 2);
+  ASSERT_TRUE(snapshot);
+  ASSERT_EQ(2u, snapshot->tab_product_identifiers.size());
+
+  const std::string first_identifier = snapshot->tab_product_identifiers[0];
+  const std::string second_identifier = snapshot->tab_product_identifiers[1];
+  const limitless::ProductCommandSplitPair original_pair{
+      .window_identifier = snapshot->window_identifier,
+      .first_tab_identifier = first_identifier,
+      .second_tab_identifier = second_identifier};
+  const limitless::ProductCommandInvocation create{
+      .command = limitless::ProductCommandId::kSplitCreate,
+      .arguments = limitless::ProductCommandSplitCreate{original_pair}};
+  const limitless::ProductCommandInvocation focus_second{
+      .command = limitless::ProductCommandId::kSplitFocus,
+      .arguments = limitless::ProductCommandSplitFocus{original_pair,
+                                                       second_identifier}};
+  const limitless::ProductCommandInvocation set_stacked{
+      .command = limitless::ProductCommandId::kSplitSetLayout,
+      .arguments = limitless::ProductCommandSetSplitLayout{
+          original_pair, limitless::ProductCommandSplitLayout::kStacked}};
+  const limitless::ProductCommandInvocation set_quarter{
+      .command = limitless::ProductCommandId::kSplitSetRatio,
+      .arguments = limitless::ProductCommandSetSplitRatio{original_pair, 0.25}};
+  const limitless::ProductCommandInvocation swap{
+      .command = limitless::ProductCommandId::kSplitSwap,
+      .arguments = original_pair};
+
+  EXPECT_EQ(limitless::ProductCommandQueryStatus::kEnabled,
+            limitless::QuerySwiftUIProductCommandForTesting(browser(), create)
+                .status);
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(), create)
+                .status);
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return one->GetSplit().has_value() && one->GetSplit() == two->GetSplit();
+  }));
+  const split_tabs::SplitTabId split_id = *one->GetSplit();
+  EXPECT_EQ(limitless::ProductCommandQueryStatus::kDisabled,
+            limitless::QuerySwiftUIProductCommandForTesting(browser(), create)
+                .status);
+
+  for (const limitless::ProductCommandInvocation* invocation :
+       {&focus_second, &set_stacked, &set_quarter, &swap}) {
+    EXPECT_EQ(
+        limitless::ProductCommandQueryStatus::kEnabled,
+        limitless::QuerySwiftUIProductCommandForTesting(browser(), *invocation)
+            .status);
+  }
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), focus_second)
+          .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == two; }));
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), set_stacked)
+          .status);
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), set_quarter)
+          .status);
+  ASSERT_TRUE(WaitForCondition([&]() {
+    const split_tabs::SplitTabData* split_data =
+        tab_strip->GetSplitData(split_id);
+    return split_data &&
+           split_data->visual_data()->split_layout() ==
+               split_tabs::SplitTabLayout::kStacked &&
+           split_data->visual_data()->split_ratio() == 0.25;
+  }));
+
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(), swap)
+                .status);
+  ASSERT_TRUE(WaitForCondition([&]() {
+    const split_tabs::SplitTabData* split_data =
+        tab_strip->GetSplitData(split_id);
+    return split_data &&
+           split_data->ListTabs() == std::vector<tabs::TabInterface*>{two, one};
+  }));
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kDisabled,
+      limitless::QuerySwiftUIProductCommandForTesting(browser(), swap).status);
+
+  const limitless::ProductCommandSplitPair swapped_pair{
+      .window_identifier = snapshot->window_identifier,
+      .first_tab_identifier = second_identifier,
+      .second_tab_identifier = first_identifier};
+  const limitless::ProductCommandInvocation unsplit{
+      .command = limitless::ProductCommandId::kSplitUnsplit,
+      .arguments = swapped_pair};
+  EXPECT_EQ(limitless::ProductCommandQueryStatus::kEnabled,
+            limitless::QuerySwiftUIProductCommandForTesting(browser(), unsplit)
+                .status);
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), unsplit)
+          .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return !one->IsSplit() && !two->IsSplit(); }));
+  EXPECT_FALSE(tab_strip->ContainsSplit(split_id));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    ProductCommandRegistryRejectsForeignMissingAndClosedWindows) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/one")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/two"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+  const auto first_snapshot = WaitForRailTabs(GetSwiftUITabRail(browser()), 2);
+  ASSERT_TRUE(first_snapshot);
+  ASSERT_GE(first_snapshot->tab_product_identifiers.size(), 2u);
+  const limitless::ProductCommandInvocation foreign_create{
+      .command = limitless::ProductCommandId::kSplitCreate,
+      .arguments = limitless::ProductCommandSplitCreate{
+          {first_snapshot->window_identifier,
+           first_snapshot->tab_product_identifiers[0],
+           first_snapshot->tab_product_identifiers[1]}}};
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kEnabled,
+      limitless::QuerySwiftUIProductCommandForTesting(browser(), foreign_create)
+          .status);
+
+  Browser* second_browser = CreateBrowser(browser()->GetProfile());
+  ASSERT_TRUE(second_browser);
+  second_browser->GetWindow()->Show();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      second_browser, https_server_.GetURL("c.test", "/three")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      second_browser, https_server_.GetURL("d.test", "/four"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+  ASSERT_TRUE(WaitForRailTabs(GetSwiftUITabRail(second_browser), 2));
+  TabStripModel* first_tab_strip = browser()->GetTabStripModel();
+  TabStripModel* second_tab_strip = second_browser->GetTabStripModel();
+  tabs::TabInterface* first_active = first_tab_strip->GetActiveTab();
+  tabs::TabInterface* second_first = second_tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* second_next = second_tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(first_active);
+  ASSERT_TRUE(second_first);
+  ASSERT_TRUE(second_next);
+  ASSERT_EQ(second_first, second_tab_strip->GetActiveTab());
+
+  EXPECT_EQ(limitless::ProductCommandQueryStatus::kDisabled,
+            limitless::QuerySwiftUIProductCommandForTesting(second_browser,
+                                                            foreign_create)
+                .status);
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kDisabled,
+            limitless::ExecuteSwiftUIProductCommandForTesting(second_browser,
+                                                              foreign_create)
+                .status);
+  EXPECT_FALSE(second_first->IsSplit());
+  EXPECT_FALSE(second_next->IsSplit());
+
+  const limitless::ProductCommandInvocation next{
+      .command = limitless::ProductCommandId::kTabsNext};
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(second_browser, next)
+          .status);
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return second_tab_strip->GetActiveTab() == second_next; }));
+  EXPECT_EQ(first_active, first_tab_strip->GetActiveTab());
+
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kDisabled,
+      limitless::QuerySwiftUIProductCommandForTesting(nullptr, next).status);
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kDisabled,
+      limitless::ExecuteSwiftUIProductCommandForTesting(nullptr, next).status);
+
+  std::optional<limitless::ProductCommandQueryStatus> closing_query_status;
+  std::optional<limitless::ProductCommandExecutionStatus>
+      closing_execution_status;
+  base::CallbackListSubscription closing_subscription =
+      second_browser->RegisterBrowserDidClose(base::BindRepeating(
+          [](const limitless::ProductCommandInvocation* invocation,
+             std::optional<limitless::ProductCommandQueryStatus>* query_status,
+             std::optional<limitless::ProductCommandExecutionStatus>*
+                 execution_status,
+             BrowserWindowInterface* closing_window) {
+            *query_status = limitless::QuerySwiftUIProductCommandForTesting(
+                                closing_window, *invocation)
+                                .status;
+            *execution_status =
+                limitless::ExecuteSwiftUIProductCommandForTesting(
+                    closing_window, *invocation)
+                    .status;
+          },
+          &next, &closing_query_status, &closing_execution_status));
+  CloseBrowserSynchronously(second_browser);
+  ASSERT_TRUE(closing_query_status);
+  ASSERT_TRUE(closing_execution_status);
+  EXPECT_EQ(limitless::ProductCommandQueryStatus::kDisabled,
+            *closing_query_status);
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kDisabled,
+            *closing_execution_status);
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
@@ -4432,13 +4769,90 @@ IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIWorkspacesDisabledBrowserTest,
       browser()->GetTabStripModel()->GetActiveWebContents()));
 
   tabs::TabInterface* first = browser()->GetTabStripModel()->GetTabAtIndex(0);
+  tabs::TabInterface* second = browser()->GetTabStripModel()->GetTabAtIndex(1);
   ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
   SendRendererKey(browser(), ui::VKEY_B, ui::EF_CONTROL_DOWN);
   ASSERT_TRUE(WaitForCondition([&]() { return IsLeaderArmed(rail); }));
   SendRendererKey(browser(), ui::VKEY_N, ui::EF_NONE, u'n');
   ASSERT_TRUE(WaitForCondition([&]() {
-    return browser()->GetTabStripModel()->GetActiveTab() == first &&
+    return browser()->GetTabStripModel()->GetActiveTab() == second &&
            !IsLeaderArmed(rail);
+  }));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIWorkspacesDisabledBrowserTest,
+    ProductCommandRegistryUsesLiveChromiumOrderWithoutWorkspaces) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/one")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/two"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  tabs::TabInterface* one = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* two = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(one);
+  ASSERT_TRUE(two);
+  ASSERT_EQ(one, tab_strip->GetActiveTab());
+  EXPECT_EQ(0, tab_strip->MoveWebContentsAt(/*index=*/1, /*to_position=*/0,
+                                            /*select_after_move=*/false));
+  ASSERT_EQ(two, tab_strip->GetTabAtIndex(0));
+  ASSERT_EQ(one, tab_strip->GetTabAtIndex(1));
+  ASSERT_EQ(one, tab_strip->GetActiveTab());
+
+  const limitless::ProductCommandInvocation next{
+      .command = limitless::ProductCommandId::kTabsNext};
+  const limitless::ProductCommandInvocation previous{
+      .command = limitless::ProductCommandId::kTabsPrevious};
+  const limitless::ProductCommandInvocation select_second{
+      .command = limitless::ProductCommandId::kTabsSelectIndex,
+      .arguments = limitless::ProductCommandTabIndex{.one_based_index = 2}};
+  const limitless::ProductCommandInvocation select_nine{
+      .command = limitless::ProductCommandId::kTabsSelectIndex,
+      .arguments = limitless::ProductCommandTabIndex{.one_based_index = 9}};
+
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kDisabled,
+      limitless::QuerySwiftUIProductCommandForTesting(browser(), select_nine)
+          .status);
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kDisabled,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), select_nine)
+          .status);
+  EXPECT_EQ(one, tab_strip->GetActiveTab());
+
+  EXPECT_EQ(
+      limitless::ProductCommandQueryStatus::kEnabled,
+      limitless::QuerySwiftUIProductCommandForTesting(browser(), next).status);
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(), next)
+                .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == two; }));
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(),
+                                                              select_second)
+                .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == one; }));
+  EXPECT_EQ(
+      limitless::ProductCommandExecutionStatus::kSucceeded,
+      limitless::ExecuteSwiftUIProductCommandForTesting(browser(), previous)
+          .status);
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == two; }));
+  const tabs::TabHandle closing = two->GetHandle();
+  const limitless::ProductCommandInvocation close{
+      .command = limitless::ProductCommandId::kTabsCloseActive};
+  EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
+            limitless::ExecuteSwiftUIProductCommandForTesting(browser(), close)
+                .status);
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return tab_strip->count() == 1 && !closing.Get() &&
+           tab_strip->GetActiveTab() == one;
   }));
 }
 

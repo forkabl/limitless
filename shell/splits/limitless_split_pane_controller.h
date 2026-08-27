@@ -118,6 +118,7 @@ class SplitPaneController final : public TabStripModelObserver {
       const std::string& window_identifier,
       const std::string& tab_identifier,
       const std::string& other_tab_identifier) const;
+  SplitPaneOperationStatus GetPairStatus(const SplitPanePairTarget& pair) const;
 
   SplitPaneOperationResult CreateSplit(const std::string& window_identifier,
                                        const std::string& tab_identifier,

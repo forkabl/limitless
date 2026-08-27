@@ -97,6 +97,7 @@ source_set("rail") {
   ]
 
   public_deps = [
+    "../../commands:command_registry",
     "../../shortcuts:leader_shortcuts",
     "../../workspaces:core",
     "//ui/views",
@@ -107,6 +108,7 @@ source_set("rail") {
   ]
 
   deps = [
+    "../../commands:command_registry",
     ":compile_swiftui",
     ":swiftui_impl",
     "../../agents:agent_presence",

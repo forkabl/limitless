@@ -40,6 +40,7 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "shell/agents/agent_presence_registry.h"
+#include "shell/commands/limitless_command_registry.h"
 #include "shell/control_plane/limitless_running_profile_control_registry.h"
 #include "shell/shortcuts/limitless_command_dispatcher_delegate_mac.h"
 #include "shell/shortcuts/limitless_leader_shortcut_controller.h"
@@ -60,6 +61,20 @@
 
 namespace limitless {
 namespace {
+
+ProductCommandQueryStatus QueryStatusForSplitOperation(
+    SplitPaneOperationStatus status) {
+  switch (status) {
+    case SplitPaneOperationStatus::kPolicyDisabled:
+    case SplitPaneOperationStatus::kUnsupportedWindowType:
+    case SplitPaneOperationStatus::kPrivateProfileUnsupported:
+      return ProductCommandQueryStatus::kUnsupported;
+    case SplitPaneOperationStatus::kSuccess:
+      return ProductCommandQueryStatus::kEnabled;
+    default:
+      return ProductCommandQueryStatus::kDisabled;
+  }
+}
 
 int g_attached_host_count = 0;
 
@@ -332,57 +347,76 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
                                  NSString* first_tab_identifier,
                                  NSString* second_tab_identifier) {
           return weak_this &&
-                 weak_this->CreateSplit(
-                     base::SysNSStringToUTF8(window_identifier),
-                     base::SysNSStringToUTF8(first_tab_identifier),
-                     base::SysNSStringToUTF8(second_tab_identifier));
+                 weak_this->DispatchProductCommand(
+                     {.command = ProductCommandId::kSplitCreate,
+                      .arguments = ProductCommandSplitCreate{
+                          {base::SysNSStringToUTF8(window_identifier),
+                           base::SysNSStringToUTF8(first_tab_identifier),
+                           base::SysNSStringToUTF8(second_tab_identifier)}}});
         }
         focusSplitHandler:^BOOL(
             NSString* window_identifier, NSString* first_tab_identifier,
             NSString* second_tab_identifier, NSString* target_tab_identifier) {
           return weak_this &&
-                 weak_this->FocusSplit(
-                     base::SysNSStringToUTF8(window_identifier),
-                     base::SysNSStringToUTF8(first_tab_identifier),
-                     base::SysNSStringToUTF8(second_tab_identifier),
-                     base::SysNSStringToUTF8(target_tab_identifier));
+                 weak_this->DispatchProductCommand(
+                     {.command = ProductCommandId::kSplitFocus,
+                      .arguments = ProductCommandSplitFocus{
+                          {base::SysNSStringToUTF8(window_identifier),
+                           base::SysNSStringToUTF8(first_tab_identifier),
+                           base::SysNSStringToUTF8(second_tab_identifier)},
+                          base::SysNSStringToUTF8(target_tab_identifier)}});
         }
         setSplitLayoutHandler:^BOOL(
             NSString* window_identifier, NSString* first_tab_identifier,
             NSString* second_tab_identifier, NSString* layout) {
+          if (![layout isEqualToString:@"stacked"] &&
+              ![layout isEqualToString:@"sideBySide"]) {
+            return NO;
+          }
           return weak_this &&
-                 weak_this->SetSplitLayout(
-                     base::SysNSStringToUTF8(window_identifier),
-                     base::SysNSStringToUTF8(first_tab_identifier),
-                     base::SysNSStringToUTF8(second_tab_identifier),
-                     base::SysNSStringToUTF8(layout));
+                 weak_this->DispatchProductCommand(
+                     {.command = ProductCommandId::kSplitSetLayout,
+                      .arguments = ProductCommandSetSplitLayout{
+                          {base::SysNSStringToUTF8(window_identifier),
+                           base::SysNSStringToUTF8(first_tab_identifier),
+                           base::SysNSStringToUTF8(second_tab_identifier)},
+                          [layout isEqualToString:@"stacked"]
+                              ? ProductCommandSplitLayout::kStacked
+                              : ProductCommandSplitLayout::kSideBySide}});
         }
         setSplitRatioHandler:^BOOL(
             NSString* window_identifier, NSString* first_tab_identifier,
             NSString* second_tab_identifier, double ratio) {
           return weak_this &&
-                 weak_this->SetSplitRatio(
-                     base::SysNSStringToUTF8(window_identifier),
-                     base::SysNSStringToUTF8(first_tab_identifier),
-                     base::SysNSStringToUTF8(second_tab_identifier), ratio);
+                 weak_this->DispatchProductCommand(
+                     {.command = ProductCommandId::kSplitSetRatio,
+                      .arguments = ProductCommandSetSplitRatio{
+                          {base::SysNSStringToUTF8(window_identifier),
+                           base::SysNSStringToUTF8(first_tab_identifier),
+                           base::SysNSStringToUTF8(second_tab_identifier)},
+                          ratio}});
         }
         swapSplitHandler:^BOOL(NSString* window_identifier,
                                NSString* first_tab_identifier,
                                NSString* second_tab_identifier) {
           return weak_this &&
-                 weak_this->SwapSplit(
-                     base::SysNSStringToUTF8(window_identifier),
-                     base::SysNSStringToUTF8(first_tab_identifier),
-                     base::SysNSStringToUTF8(second_tab_identifier));
+                 weak_this->DispatchProductCommand(
+                     {.command = ProductCommandId::kSplitSwap,
+                      .arguments = ProductCommandSplitPair{
+                          base::SysNSStringToUTF8(window_identifier),
+                          base::SysNSStringToUTF8(first_tab_identifier),
+                          base::SysNSStringToUTF8(second_tab_identifier)}});
         }
         unsplitHandler:^BOOL(NSString* window_identifier,
                              NSString* first_tab_identifier,
                              NSString* second_tab_identifier) {
           return weak_this &&
-                 weak_this->Unsplit(
-                     base::SysNSStringToUTF8(window_identifier),
-                     base::SysNSStringToUTF8(first_tab_identifier),
-                     base::SysNSStringToUTF8(second_tab_identifier));
+                 weak_this->DispatchProductCommand(
+                     {.command = ProductCommandId::kSplitUnsplit,
+                      .arguments = ProductCommandSplitPair{
+                          base::SysNSStringToUTF8(window_identifier),
+                          base::SysNSStringToUTF8(first_tab_identifier),
+                          base::SysNSStringToUTF8(second_tab_identifier)}});
         }];
     Profile* profile = browser_window_->GetProfile();
     if (!profile->IsOffTheRecord() && profile->GetPrefs() &&
@@ -407,6 +441,26 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
         browser_window_,
         base::BindRepeating(&SwiftUITabRailHost::ScheduleProjectionUpdate,
                             weak_this));
+    command_registry_ = std::make_unique<ProductCommandRegistry>(
+        base::BindRepeating(
+            [](base::WeakPtr<SwiftUITabRailHost> host,
+               const ProductCommandInvocation& invocation)
+                -> ProductCommandQueryResult {
+              return host ? host->QueryProductCommand(invocation)
+                          : ProductCommandQueryResult{
+                                .status = ProductCommandQueryStatus::kDisabled};
+            },
+            weak_this),
+        base::BindRepeating(
+            [](base::WeakPtr<SwiftUITabRailHost> host,
+               const ProductCommandInvocation& invocation,
+               ProductCommandOrigin) {
+              return host ? host->ExecuteProductCommand(invocation)
+                          : ProductCommandExecutionResult{
+                                .status =
+                                    ProductCommandExecutionStatus::kFailed};
+            },
+            weak_this));
     const bool leader_enabled =
         AreLeaderShortcutsEnabled(*base::CommandLine::ForCurrentProcess());
     leader_controller_ = std::make_unique<LeaderShortcutController>(
@@ -489,6 +543,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
 
   void OnBrowserDidClose(BrowserWindowInterface* browser_window) {
     leader_controller_->Stop();
+    command_registry_.reset();
     StopObservingAgentPresence();
     split_controller_->Stop();
     workspace_controller_->Stop();
@@ -535,10 +590,10 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   }
 
   void OnRailDensityChanged(const EffectivePreferenceValue& effective_value) {
-    NSString* value = effective_value.value.rail_density ==
-                              RailDensity::kComfortable
-                          ? @"comfortable"
-                          : @"compact";
+    NSString* value =
+        effective_value.value.rail_density == RailDensity::kComfortable
+            ? @"comfortable"
+            : @"compact";
     [native_view_ updateRailDensity:value];
   }
 
@@ -763,6 +818,137 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     snapshot.leader_native_delegate_requested =
         leader_native_delegate_requested_;
     return snapshot;
+  }
+
+  ProductCommandQueryResult QueryProductCommand(
+      const ProductCommandInvocation& invocation) const {
+    if (!browser_window_ || !tab_list_ || !workspace_controller_ ||
+        browser_window_->IsDeleteScheduled() || tab_list_->IsClosingAllTabs()) {
+      return {.status = ProductCommandQueryStatus::kDisabled};
+    }
+
+    switch (invocation.command) {
+      case ProductCommandId::kSidebarToggle:
+        return {.status = GetWidget() && native_view_
+                              ? ProductCommandQueryStatus::kEnabled
+                              : ProductCommandQueryStatus::kDisabled};
+      case ProductCommandId::kTabsNext:
+      case ProductCommandId::kTabsPrevious:
+      case ProductCommandId::kTabsSelectIndex:
+      case ProductCommandId::kTabsCloseActive:
+        break;
+      case ProductCommandId::kSplitCreate:
+      case ProductCommandId::kSplitFocus:
+      case ProductCommandId::kSplitSetLayout:
+      case ProductCommandId::kSplitSetRatio:
+      case ProductCommandId::kSplitSwap:
+      case ProductCommandId::kSplitUnsplit: {
+        if (!split_controller_) {
+          return {.status = ProductCommandQueryStatus::kDisabled};
+        }
+
+        const ProductCommandSplitPair* pair = nullptr;
+        switch (invocation.command) {
+          case ProductCommandId::kSplitCreate: {
+            const auto* arguments =
+                std::get_if<ProductCommandSplitCreate>(&invocation.arguments);
+            pair = arguments ? &arguments->pair : nullptr;
+            break;
+          }
+          case ProductCommandId::kSplitFocus: {
+            const auto* arguments =
+                std::get_if<ProductCommandSplitFocus>(&invocation.arguments);
+            pair = arguments ? &arguments->pair : nullptr;
+            break;
+          }
+          case ProductCommandId::kSplitSetLayout: {
+            const auto* arguments = std::get_if<ProductCommandSetSplitLayout>(
+                &invocation.arguments);
+            pair = arguments ? &arguments->pair : nullptr;
+            break;
+          }
+          case ProductCommandId::kSplitSetRatio: {
+            const auto* arguments =
+                std::get_if<ProductCommandSetSplitRatio>(&invocation.arguments);
+            pair = arguments ? &arguments->pair : nullptr;
+            break;
+          }
+          case ProductCommandId::kSplitSwap:
+          case ProductCommandId::kSplitUnsplit:
+            pair = std::get_if<ProductCommandSplitPair>(&invocation.arguments);
+            break;
+          case ProductCommandId::kTabsNext:
+          case ProductCommandId::kTabsPrevious:
+          case ProductCommandId::kTabsSelectIndex:
+          case ProductCommandId::kTabsCloseActive:
+          case ProductCommandId::kSidebarToggle:
+            NOTREACHED();
+        }
+        if (!pair) {
+          return {.status = ProductCommandQueryStatus::kInvalidInvocation};
+        }
+
+        if (invocation.command == ProductCommandId::kSplitCreate) {
+          return {.status = QueryStatusForSplitOperation(
+                      split_controller_->GetCreateSplitStatus(
+                          pair->window_identifier, pair->first_tab_identifier,
+                          pair->second_tab_identifier))};
+        }
+        return {.status = QueryStatusForSplitOperation(
+                    split_controller_->GetPairStatus(
+                        {pair->window_identifier, pair->first_tab_identifier,
+                         pair->second_tab_identifier}))};
+      }
+    }
+
+    Profile* profile = browser_window_->GetProfile();
+    if (!profile || profile->IsOffTheRecord() ||
+        !TabListInterface::CanEditTabList(*profile)) {
+      return {.status = ProductCommandQueryStatus::kDisabled};
+    }
+
+    const std::vector<tabs::TabHandle> visible_tabs =
+        workspace_controller_->GetVisibleTabs();
+    for (tabs::TabHandle handle : visible_tabs) {
+      tabs::TabInterface* tab = handle.Get();
+      if (!tab || tab->GetBrowserWindowInterface() != browser_window_ ||
+          tab->GetProfile() != profile ||
+          tab_list_->GetIndexOfTab(handle) < 0) {
+        return {.status = ProductCommandQueryStatus::kDisabled};
+      }
+    }
+
+    tabs::TabInterface* active_tab = tab_list_->GetActiveTab();
+    if (!active_tab ||
+        std::ranges::find(visible_tabs, active_tab->GetHandle()) ==
+            visible_tabs.end()) {
+      return {.status = ProductCommandQueryStatus::kDisabled};
+    }
+    if (invocation.command == ProductCommandId::kTabsSelectIndex) {
+      const auto* index =
+          std::get_if<ProductCommandTabIndex>(&invocation.arguments);
+      if (!index || index->one_based_index > visible_tabs.size()) {
+        return {.status = ProductCommandQueryStatus::kDisabled};
+      }
+    }
+    return {.status = ProductCommandQueryStatus::kEnabled};
+  }
+
+  ProductCommandQueryResult QueryProductCommandForTesting(
+      const ProductCommandInvocation& invocation) const {
+    return command_registry_
+               ? command_registry_->Query(invocation)
+               : ProductCommandQueryResult{
+                     .status = ProductCommandQueryStatus::kDisabled};
+  }
+
+  ProductCommandExecutionResult ExecuteProductCommandForTesting(
+      const ProductCommandInvocation& invocation) {
+    return command_registry_
+               ? command_registry_->Execute(invocation,
+                                            ProductCommandOrigin::kNativeUi)
+               : ProductCommandExecutionResult{
+                     .status = ProductCommandExecutionStatus::kDisabled};
   }
 
   SwiftUIAgentRailSnapshotForTesting AgentSnapshotForTesting() const {
@@ -1256,38 +1442,19 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
         browser_window_->IsDeleteScheduled() || tab_list_->IsClosingAllTabs()) {
       return false;
     }
-    if (command == LeaderCommand::kToggleSidebar) {
-      sidebar_visible_ = !sidebar_visible_;
-      SetVisible(sidebar_visible_ || leader_controller_->armed());
-      return true;
-    }
-
-    tabs::TabInterface* active_tab = tab_list_->GetActiveTab();
-    if (!active_tab || !CanOperateOnTab(active_tab->GetHandle().raw_value())) {
-      return false;
-    }
-    if (command == LeaderCommand::kCloseTab) {
-      return CloseTab(active_tab->GetHandle().raw_value());
-    }
-
-    int target_index = -1;
-    const std::vector<tabs::TabHandle> visible_tabs =
-        workspace_controller_->GetVisibleTabs();
-    auto active = std::ranges::find(visible_tabs, active_tab->GetHandle());
-    const int active_index =
-        active == visible_tabs.end()
-            ? -1
-            : static_cast<int>(active - visible_tabs.begin());
-    const int tab_count = static_cast<int>(visible_tabs.size());
-    if (active_index < 0 || tab_count <= 0) {
-      return false;
-    }
+    ProductCommandInvocation invocation;
     switch (command) {
       case LeaderCommand::kNextTab:
-        target_index = (active_index + 1) % tab_count;
+        invocation.command = ProductCommandId::kTabsNext;
         break;
       case LeaderCommand::kPreviousTab:
-        target_index = (active_index + tab_count - 1) % tab_count;
+        invocation.command = ProductCommandId::kTabsPrevious;
+        break;
+      case LeaderCommand::kCloseTab:
+        invocation.command = ProductCommandId::kTabsCloseActive;
+        break;
+      case LeaderCommand::kToggleSidebar:
+        invocation.command = ProductCommandId::kSidebarToggle;
         break;
       case LeaderCommand::kSelectTab1:
       case LeaderCommand::kSelectTab2:
@@ -1298,21 +1465,195 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
       case LeaderCommand::kSelectTab7:
       case LeaderCommand::kSelectTab8:
       case LeaderCommand::kSelectTab9:
-        target_index = static_cast<int>(command) -
-                       static_cast<int>(LeaderCommand::kSelectTab1);
         break;
-      case LeaderCommand::kCloseTab:
-      case LeaderCommand::kToggleSidebar:
-        NOTREACHED();
     }
-    tabs::TabInterface* target_tab =
-        target_index >= 0 && target_index < tab_count
-            ? visible_tabs[target_index].Get()
-            : nullptr;
-    if (!target_tab || !CanOperateOnTab(target_tab->GetHandle().raw_value())) {
+    if (command >= LeaderCommand::kSelectTab1 &&
+        command <= LeaderCommand::kSelectTab9) {
+      invocation.command = ProductCommandId::kTabsSelectIndex;
+      invocation.arguments = ProductCommandTabIndex{
+          .one_based_index = static_cast<uint32_t>(command) -
+                             static_cast<uint32_t>(LeaderCommand::kSelectTab1) +
+                             1};
+    }
+    return command_registry_
+               ->Execute(invocation, ProductCommandOrigin::kLeaderShortcut)
+               .status == ProductCommandExecutionStatus::kSucceeded;
+  }
+
+  ProductCommandExecutionResult ExecuteProductCommand(
+      const ProductCommandInvocation& invocation) {
+    if (!browser_window_ || !tab_list_ ||
+        browser_window_->IsDeleteScheduled() || tab_list_->IsClosingAllTabs()) {
+      return {.status = ProductCommandExecutionStatus::kDisabled};
+    }
+    switch (invocation.command) {
+      case ProductCommandId::kSidebarToggle:
+        sidebar_visible_ = !sidebar_visible_;
+        SetVisible(sidebar_visible_ || leader_controller_->armed());
+        return {.status = ProductCommandExecutionStatus::kSucceeded};
+      case ProductCommandId::kTabsCloseActive:
+      case ProductCommandId::kTabsSelectIndex:
+      case ProductCommandId::kTabsNext:
+      case ProductCommandId::kTabsPrevious:
+        break;
+      case ProductCommandId::kSplitCreate:
+      case ProductCommandId::kSplitFocus:
+      case ProductCommandId::kSplitSetLayout:
+      case ProductCommandId::kSplitSetRatio:
+      case ProductCommandId::kSplitSwap:
+      case ProductCommandId::kSplitUnsplit: {
+        ProductCommandSplitPair pair;
+        if (const auto* create_args =
+                std::get_if<ProductCommandSplitCreate>(&invocation.arguments)) {
+          pair = create_args->pair;
+        } else if (const auto* focus_args =
+                       std::get_if<ProductCommandSplitFocus>(
+                           &invocation.arguments)) {
+          pair = focus_args->pair;
+        } else if (const auto* layout_args =
+                       std::get_if<ProductCommandSetSplitLayout>(
+                           &invocation.arguments)) {
+          pair = layout_args->pair;
+        } else if (const auto* ratio_args =
+                       std::get_if<ProductCommandSetSplitRatio>(
+                           &invocation.arguments)) {
+          pair = ratio_args->pair;
+        } else if (const auto* pair_args = std::get_if<ProductCommandSplitPair>(
+                       &invocation.arguments)) {
+          pair = *pair_args;
+        } else {
+          return {.status = ProductCommandExecutionStatus::kInvalidInvocation};
+        }
+        bool ok = false;
+        if (invocation.command == ProductCommandId::kSplitCreate) {
+          ok = CreateSplit(pair.window_identifier, pair.first_tab_identifier,
+                           pair.second_tab_identifier);
+        } else if (invocation.command == ProductCommandId::kSplitFocus) {
+          const auto* p =
+              std::get_if<ProductCommandSplitFocus>(&invocation.arguments);
+          ok = p &&
+               FocusSplit(pair.window_identifier, pair.first_tab_identifier,
+                          pair.second_tab_identifier, p->member_tab_identifier);
+        } else if (invocation.command == ProductCommandId::kSplitSetLayout) {
+          const auto* p =
+              std::get_if<ProductCommandSetSplitLayout>(&invocation.arguments);
+          ok = p &&
+               SetSplitLayout(pair.window_identifier, pair.first_tab_identifier,
+                              pair.second_tab_identifier,
+                              p->layout == ProductCommandSplitLayout::kStacked
+                                  ? "stacked"
+                                  : "sideBySide");
+        } else if (invocation.command == ProductCommandId::kSplitSetRatio) {
+          const auto* p =
+              std::get_if<ProductCommandSetSplitRatio>(&invocation.arguments);
+          ok = p &&
+               SetSplitRatio(pair.window_identifier, pair.first_tab_identifier,
+                             pair.second_tab_identifier, p->ratio);
+        } else if (invocation.command == ProductCommandId::kSplitSwap) {
+          ok = SwapSplit(pair.window_identifier, pair.first_tab_identifier,
+                         pair.second_tab_identifier);
+        } else if (invocation.command == ProductCommandId::kSplitUnsplit) {
+          ok = Unsplit(pair.window_identifier, pair.first_tab_identifier,
+                       pair.second_tab_identifier);
+        }
+        return {.status = ok ? ProductCommandExecutionStatus::kSucceeded
+                             : ProductCommandExecutionStatus::kDisabled};
+      }
+    }
+    if (!workspace_controller_) {
+      return {.status = ProductCommandExecutionStatus::kDisabled};
+    }
+
+    Profile* profile = browser_window_->GetProfile();
+    if (!profile || profile->IsOffTheRecord() ||
+        !TabListInterface::CanEditTabList(*profile)) {
+      return {.status = ProductCommandExecutionStatus::kDisabled};
+    }
+
+    const std::vector<tabs::TabHandle> visible_tabs =
+        workspace_controller_->GetVisibleTabs();
+    for (tabs::TabHandle handle : visible_tabs) {
+      tabs::TabInterface* tab = handle.Get();
+      if (!tab || tab->GetBrowserWindowInterface() != browser_window_ ||
+          tab->GetProfile() != profile ||
+          tab_list_->GetIndexOfTab(handle) < 0) {
+        return {.status = ProductCommandExecutionStatus::kDisabled};
+      }
+    }
+
+    tabs::TabInterface* active_tab = tab_list_->GetActiveTab();
+    if (!active_tab ||
+        active_tab->GetBrowserWindowInterface() != browser_window_ ||
+        active_tab->GetProfile() != profile) {
+      return {.status = ProductCommandExecutionStatus::kDisabled};
+    }
+    const tabs::TabHandle active_handle = active_tab->GetHandle();
+    const auto active_position = std::ranges::find(visible_tabs, active_handle);
+    if (active_position == visible_tabs.end() ||
+        tab_list_->GetIndexOfTab(active_handle) < 0) {
+      return {.status = ProductCommandExecutionStatus::kDisabled};
+    }
+
+    if (invocation.command == ProductCommandId::kTabsCloseActive) {
+      if (tab_list_->GetActiveTab() != active_tab ||
+          active_handle.Get() != active_tab) {
+        return {.status = ProductCommandExecutionStatus::kDisabled};
+      }
+      return {.status = CloseTab(active_handle.raw_value())
+                            ? ProductCommandExecutionStatus::kSucceeded
+                            : ProductCommandExecutionStatus::kFailed};
+    }
+
+    if (invocation.command == ProductCommandId::kTabsSelectIndex) {
+      const auto* index =
+          std::get_if<ProductCommandTabIndex>(&invocation.arguments);
+      if (!index || index->one_based_index == 0) {
+        return {.status = ProductCommandExecutionStatus::kInvalidInvocation};
+      }
+      if (index->one_based_index > visible_tabs.size()) {
+        return {.status = ProductCommandExecutionStatus::kDisabled};
+      }
+      const tabs::TabHandle selected_handle =
+          visible_tabs[index->one_based_index - 1];
+      tabs::TabInterface* selected = selected_handle.Get();
+      if (!selected ||
+          selected->GetBrowserWindowInterface() != browser_window_ ||
+          selected->GetProfile() != profile ||
+          tab_list_->GetIndexOfTab(selected_handle) < 0 ||
+          tab_list_->GetActiveTab() != active_tab) {
+        return {.status = ProductCommandExecutionStatus::kDisabled};
+      }
+      return {.status = ActivateTab(selected_handle.raw_value())
+                            ? ProductCommandExecutionStatus::kSucceeded
+                            : ProductCommandExecutionStatus::kFailed};
+    }
+
+    const size_t current = active_position - visible_tabs.begin();
+    const size_t target =
+        invocation.command == ProductCommandId::kTabsPrevious
+            ? (current + visible_tabs.size() - 1) % visible_tabs.size()
+            : (current + 1) % visible_tabs.size();
+    const tabs::TabHandle target_handle = visible_tabs[target];
+    tabs::TabInterface* target_tab = target_handle.Get();
+    if (!target_tab ||
+        target_tab->GetBrowserWindowInterface() != browser_window_ ||
+        target_tab->GetProfile() != profile ||
+        tab_list_->GetIndexOfTab(target_handle) < 0 ||
+        tab_list_->GetActiveTab() != active_tab) {
+      return {.status = ProductCommandExecutionStatus::kDisabled};
+    }
+    return {.status = ActivateTab(target_handle.raw_value())
+                          ? ProductCommandExecutionStatus::kSucceeded
+                          : ProductCommandExecutionStatus::kFailed};
+  }
+
+  bool DispatchProductCommand(ProductCommandInvocation invocation) {
+    if (!command_registry_) {
       return false;
     }
-    return ActivateTab(target_tab->GetHandle().raw_value());
+    return command_registry_
+               ->Execute(invocation, ProductCommandOrigin::kNativeUi)
+               .status == ProductCommandExecutionStatus::kSucceeded;
   }
 
   void OnLeaderArmedChanged(bool armed) {
@@ -1368,11 +1709,27 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   }
 
   bool ActivateTab(int32_t tab_identifier) {
+    if (!workspace_controller_->GetSnapshot().enabled) {
+      tabs::TabHandle handle(tab_identifier);
+      if (!CanOperateOnTab(tab_identifier)) {
+        return false;
+      }
+      tab_list_->ActivateTab(handle);
+      return true;
+    }
     return workspace_controller_->ActivateTab(tabs::TabHandle(tab_identifier))
         .succeeded();
   }
 
   bool CloseTab(int32_t tab_identifier) {
+    if (!workspace_controller_->GetSnapshot().enabled) {
+      tabs::TabHandle handle(tab_identifier);
+      if (!CanOperateOnTab(tab_identifier)) {
+        return false;
+      }
+      tab_list_->CloseTab(handle);
+      return true;
+    }
     return workspace_controller_->CloseTab(tabs::TabHandle(tab_identifier))
         .succeeded();
   }
@@ -1397,6 +1754,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   std::unique_ptr<WorkspaceController> workspace_controller_;
   std::unique_ptr<SplitPaneController> split_controller_;
   std::unique_ptr<LeaderShortcutController> leader_controller_;
+  std::unique_ptr<ProductCommandRegistry> command_registry_;
   std::unique_ptr<RunningProfileControlRegistry::Registration>
       preference_registration_;
   base::CallbackListSubscription browser_did_close_subscription_;
@@ -1432,6 +1790,24 @@ SwiftUITabRailHost* FindHost(BrowserWindowInterface* browser_window) {
 }
 
 }  // namespace
+
+ProductCommandQueryResult QuerySwiftUIProductCommandForTesting(
+    BrowserWindowInterface* browser_window,
+    const ProductCommandInvocation& invocation) {
+  SwiftUITabRailHost* host = FindHost(browser_window);
+  return host ? host->QueryProductCommandForTesting(invocation)
+              : ProductCommandQueryResult{
+                    .status = ProductCommandQueryStatus::kDisabled};
+}
+
+ProductCommandExecutionResult ExecuteSwiftUIProductCommandForTesting(
+    BrowserWindowInterface* browser_window,
+    const ProductCommandInvocation& invocation) {
+  SwiftUITabRailHost* host = FindHost(browser_window);
+  return host ? host->ExecuteProductCommandForTesting(invocation)
+              : ProductCommandExecutionResult{
+                    .status = ProductCommandExecutionStatus::kDisabled};
+}
 
 std::unique_ptr<views::View> MaybeCreateSwiftUITabRail(
     BrowserWindowInterface* browser_window) {

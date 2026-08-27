@@ -35,6 +35,17 @@ class View;
 
 namespace limitless {
 
+struct ProductCommandInvocation;
+struct ProductCommandQueryResult;
+struct ProductCommandExecutionResult;
+
+ProductCommandQueryResult QuerySwiftUIProductCommandForTesting(
+    BrowserWindowInterface* browser_window,
+    const ProductCommandInvocation& invocation);
+ProductCommandExecutionResult ExecuteSwiftUIProductCommandForTesting(
+    BrowserWindowInterface* browser_window,
+    const ProductCommandInvocation& invocation);
+
 inline constexpr char kSwiftUIBoundaryProbeSwitch[] =
     "limitless-swiftui-boundary-probe";
 inline constexpr int kSwiftUITabRailWidth = 216;

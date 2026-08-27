@@ -274,6 +274,13 @@ SplitPaneOperationStatus SplitPaneController::GetCreateSplitStatus(
                              other_tab_identifier, &tab, &other_tab);
 }
 
+SplitPaneOperationStatus SplitPaneController::GetPairStatus(
+    const SplitPanePairTarget& pair) const {
+  tabs::TabHandle first;
+  tabs::TabHandle second;
+  return ResolvePair(pair, &first, &second);
+}
+
 SplitPaneOperationResult SplitPaneController::CreateSplit(
     const std::string& window_identifier,
     const std::string& tab_identifier,
