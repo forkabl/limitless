@@ -34,6 +34,7 @@ bool ValidateProductCommandWindowState(const ProductCommandWindowState& state) {
   std::set<std::string> split_ids;
   std::set<std::string> split_members;
   size_t active_splits = 0;
+  bool active_tab_in_split = false;
   for (const ProductCommandSplitState& split : state.splits) {
     if (!canonical(split.split_instance_id) ||
         !split_ids.insert(split.split_instance_id).second ||
@@ -51,8 +52,24 @@ bool ValidateProductCommandWindowState(const ProductCommandWindowState& state) {
         (split.active_tab_id && *split.active_tab_id != *state.active_tab_id)) {
       return false;
     }
+    if (*state.active_tab_id == split.first_tab_id ||
+        *state.active_tab_id == split.second_tab_id) {
+      active_tab_in_split = true;
+      if (!split.active_tab_id) {
+        return false;
+      }
+    } else if (split.active_tab_id) {
+      return false;
+    }
+    switch (split.layout) {
+      case ProductCommandSplitLayout::kSideBySide:
+      case ProductCommandSplitLayout::kStacked:
+        break;
+      default:
+        return false;
+    }
   }
-  return true;
+  return !active_tab_in_split || active_splits == 1;
 }
 
 ProductCommandWindowBinding::ProductCommandWindowBinding(
@@ -73,9 +90,15 @@ ProductCommandWindowBinding::GetWeakPtr() {
 std::optional<ProductCommandWindowState> ProductCommandWindowBinding::GetState()
     const {
   StateCallback state = state_;
+  base::WeakPtr<ProductCommandRegistry> registry = registry_;
+  if (!registry) {
+    return std::nullopt;
+  }
   std::optional<ProductCommandWindowState> value = state.Run();
-  return value && ValidateProductCommandWindowState(*value) ? value
-                                                            : std::nullopt;
+  if (!registry || !value || !ValidateProductCommandWindowState(*value)) {
+    return std::nullopt;
+  }
+  return value;
 }
 
 ProductCommandQueryResult ProductCommandWindowBinding::Query(

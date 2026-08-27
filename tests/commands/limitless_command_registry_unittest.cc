@@ -21,6 +21,9 @@ constexpr char kWindowId[] = "10000000-0000-4000-8000-000000000001";
 constexpr char kFirstTabId[] = "20000000-0000-4000-8000-000000000002";
 constexpr char kSecondTabId[] = "30000000-0000-4000-8000-000000000003";
 constexpr char kForeignTabId[] = "40000000-0000-4000-8000-000000000004";
+constexpr char kThirdTabId[] = "50000000-0000-4000-8000-000000000005";
+constexpr char kFourthTabId[] = "60000000-0000-4000-8000-000000000006";
+constexpr char kSecondSplitId[] = "70000000-0000-4000-8000-000000000007";
 
 ProductCommandSplitPair ValidPair() {
   return {
@@ -439,7 +442,10 @@ TEST(ProductCommandWindowBindingTest, DelegatesGuardedExecution) {
       registry.GetWeakPtr(),
       base::BindLambdaForTesting(
           []() -> std::optional<ProductCommandWindowState> {
-            return ProductCommandWindowState{.window_id = kWindowId};
+            return ProductCommandWindowState{.window_id = kWindowId,
+                                             .active_workspace_id = kWindowId,
+                                             .visible_tab_ids = {kFirstTabId},
+                                             .active_tab_id = kFirstTabId};
           }));
 
   EXPECT_EQ(
@@ -498,9 +504,13 @@ TEST(ProductCommandWindowBindingTest, ExpiredRegistryFailsClosed) {
       registry->GetWeakPtr(),
       base::BindLambdaForTesting(
           []() -> std::optional<ProductCommandWindowState> {
-            return ProductCommandWindowState{.window_id = kWindowId};
+            return ProductCommandWindowState{.window_id = kWindowId,
+                                             .active_workspace_id = kWindowId,
+                                             .visible_tab_ids = {kFirstTabId},
+                                             .active_tab_id = kFirstTabId};
           }));
   registry.reset();
+  EXPECT_FALSE(binding.GetState());
   ProductCommandInvocation invocation{.command = ProductCommandId::kTabsNext};
   EXPECT_EQ(ProductCommandQueryStatus::kDisabled,
             binding.Query(invocation).status);
@@ -586,6 +596,54 @@ TEST(ProductCommandWindowBindingTest,
   active_outside.splits[0].active_tab_id = kSecondTabId;
   active_outside.active_tab_id = kFirstTabId;
   EXPECT_FALSE(ValidateProductCommandWindowState(active_outside));
+  ProductCommandWindowState reused_member = valid;
+  reused_member.visible_tab_ids.push_back(kForeignTabId);
+  reused_member.splits = {valid_split.splits[0],
+                          {.split_instance_id = kForeignTabId,
+                           .first_tab_id = kFirstTabId,
+                           .second_tab_id = kForeignTabId}};
+  EXPECT_FALSE(ValidateProductCommandWindowState(reused_member));
+  ProductCommandWindowState two_active = valid_split;
+  two_active.splits.push_back({.split_instance_id = kForeignTabId,
+                               .first_tab_id = kThirdTabId,
+                               .second_tab_id = kFourthTabId,
+                               .active_tab_id = kThirdTabId});
+  two_active.visible_tab_ids.insert(two_active.visible_tab_ids.end(),
+                                    {kThirdTabId, kFourthTabId});
+  two_active.splits[0].split_instance_id = kSecondSplitId;
+  EXPECT_FALSE(ValidateProductCommandWindowState(two_active));
+  ProductCommandWindowState invalid_layout = valid_split;
+  invalid_layout.splits[0].layout = static_cast<ProductCommandSplitLayout>(999);
+  EXPECT_FALSE(ValidateProductCommandWindowState(invalid_layout));
+  ProductCommandWindowState marker_outside = valid_split;
+  marker_outside.visible_tab_ids.push_back(kThirdTabId);
+  marker_outside.splits[0].active_tab_id = kThirdTabId;
+  EXPECT_FALSE(ValidateProductCommandWindowState(marker_outside));
+  ProductCommandWindowState missing_marker = valid_split;
+  missing_marker.splits[0].active_tab_id.reset();
+  EXPECT_FALSE(ValidateProductCommandWindowState(missing_marker));
+}
+
+TEST(ProductCommandWindowBindingTest, StateCallbackCanExpireRegistry) {
+  auto registry = std::make_unique<ProductCommandRegistry>(
+      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{};
+      }),
+      base::BindLambdaForTesting(
+          [](const ProductCommandInvocation&, ProductCommandOrigin) {
+            return ProductCommandExecutionResult{};
+          }));
+  ProductCommandWindowBinding binding(
+      registry->GetWeakPtr(),
+      base::BindLambdaForTesting(
+          [&]() -> std::optional<ProductCommandWindowState> {
+            registry.reset();
+            return ProductCommandWindowState{.window_id = kWindowId,
+                                             .active_workspace_id = kWindowId,
+                                             .visible_tab_ids = {kFirstTabId},
+                                             .active_tab_id = kFirstTabId};
+          }));
+  EXPECT_FALSE(binding.GetState());
 }
 
 TEST(LimitlessCommandRegistryTest, LiveRequeryRejectsChangedState) {

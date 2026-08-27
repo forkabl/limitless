@@ -1387,6 +1387,40 @@ IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
                split_tabs::SplitTabLayout::kStacked &&
            split_data->visual_data()->split_ratio() == 0.25;
   }));
+  auto window_state =
+      limitless::GetSwiftUIProductCommandWindowStateForTesting(browser());
+  ASSERT_TRUE(window_state);
+  ASSERT_EQ(1u, window_state->splits.size());
+  const std::string binding_split_id =
+      window_state->splits[0].split_instance_id;
+  const base::Uuid binding_uuid = base::Uuid::ParseLowercase(binding_split_id);
+  EXPECT_TRUE(binding_uuid.is_valid());
+  ASSERT_TRUE(WaitForCondition([&]() {
+    const auto projection =
+        limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    return projection && projection->split_pair_identifiers.size() == 1u &&
+           projection->split_layouts.size() == 1u &&
+           projection->split_layouts[0] == "stacked" &&
+           projection->split_ratios.size() == 1u &&
+           projection->split_ratios[0] == 0.25 &&
+           projection->split_active_tab_identifiers.size() == 1u &&
+           projection->split_active_tab_identifiers[0] == second_identifier;
+  }));
+  const auto rail_state = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+  ASSERT_TRUE(rail_state);
+  ASSERT_EQ(1u, rail_state->split_pair_identifiers.size());
+  auto* split_controller = limitless::SplitPaneController::From(browser());
+  ASSERT_TRUE(split_controller);
+  const auto controller_state = split_controller->GetSnapshot();
+  ASSERT_EQ(1u, controller_state.splits.size());
+  EXPECT_EQ(binding_split_id,
+            controller_state.splits[0].split_instance_identifier);
+  EXPECT_EQ(first_identifier, window_state->splits[0].first_tab_id);
+  EXPECT_EQ(second_identifier, window_state->splits[0].second_tab_id);
+  EXPECT_EQ(limitless::ProductCommandSplitLayout::kStacked,
+            window_state->splits[0].layout);
+  EXPECT_DOUBLE_EQ(0.25, window_state->splits[0].ratio);
+  EXPECT_EQ(second_identifier, window_state->splits[0].active_tab_id);
 
   EXPECT_EQ(limitless::ProductCommandExecutionStatus::kSucceeded,
             limitless::ExecuteSwiftUIProductCommandForTesting(browser(), swap)
@@ -4760,6 +4794,8 @@ IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIWorkspacesDisabledBrowserTest,
                        DisabledPolicyKeepsChromiumTabAuthorityAndNoMetadata) {
+  EXPECT_FALSE(
+      limitless::GetSwiftUIProductCommandWindowStateForTesting(browser()));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), https_server_.GetURL("a.test", "/one")));
   ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(

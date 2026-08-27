@@ -35,6 +35,10 @@ struct ProductCommandWindowState {
   bool is_active = false;
 };
 
+// Validates the shape of externally visible live window state without using
+// browser objects or routing policy.
+bool ValidateProductCommandWindowState(const ProductCommandWindowState& state);
+
 class ProductCommandWindowBinding {
  public:
   using StateCallback =

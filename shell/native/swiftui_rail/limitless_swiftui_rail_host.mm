@@ -831,8 +831,9 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   }
 
   std::optional<ProductCommandWindowState> QueryProductWindowState() const {
-    if (!browser_window_ || !workspace_controller_ || !tab_list_ ||
-        browser_window_->IsDeleteScheduled() || tab_list_->IsClosingAllTabs()) {
+    if (!browser_window_ || !workspace_controller_ || !split_controller_ ||
+        !tab_list_ || browser_window_->IsDeleteScheduled() ||
+        tab_list_->IsClosingAllTabs()) {
       return std::nullopt;
     }
     const WorkspaceWindowSnapshot workspace =
@@ -856,8 +857,13 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     state.active_workspace_id = workspace.active_workspace_identifier;
     std::set<std::string> tab_ids;
     std::set<int32_t> tab_handles;
-    for (const WorkspaceTabProjection& tab :
-         workspace.visible_tab_projections) {
+    for (size_t index = 0; index < workspace.visible_tab_projections.size();
+         ++index) {
+      const WorkspaceTabProjection& tab =
+          workspace.visible_tab_projections[index];
+      if (workspace.visible_tabs[index] != tab.handle) {
+        return std::nullopt;
+      }
       if (!canonical(tab.identifier) ||
           !tab_ids.insert(tab.identifier).second ||
           !tab_handles.insert(tab.handle.raw_value()).second) {
@@ -910,14 +916,24 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
             return std::nullopt;
           }
         }
+        std::optional<ProductCommandSplitLayout> layout;
+        switch (split.layout) {
+          case SplitPaneLayout::kSideBySide:
+            layout = ProductCommandSplitLayout::kSideBySide;
+            break;
+          case SplitPaneLayout::kStacked:
+            layout = ProductCommandSplitLayout::kStacked;
+            break;
+        }
+        if (!layout) {
+          return std::nullopt;
+        }
         state.splits.push_back(
             {.split_instance_id = split.split_instance_identifier,
              .first_tab_id = split.first_tab_identifier,
              .second_tab_id = split.second_tab_identifier,
              .active_tab_id = split.active_tab_identifier,
-             .layout = split.layout == SplitPaneLayout::kStacked
-                           ? ProductCommandSplitLayout::kStacked
-                           : ProductCommandSplitLayout::kSideBySide,
+             .layout = *layout,
              .ratio = split.ratio});
       }
     }
