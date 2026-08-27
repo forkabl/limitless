@@ -12,6 +12,12 @@
 #include "base/process/process_handle.h"
 
 namespace {
+enum class PathCheck { kAbsent, kExists, kError };
+PathCheck CheckPath(const base::FilePath& path) {
+  struct stat st = {};
+  if (lstat(path.value().c_str(), &st) == 0) return PathCheck::kExists;
+  return errno == ENOENT ? PathCheck::kAbsent : PathCheck::kError;
+}
 bool WriteAtomic(const base::FilePath& path, std::string_view value) {
   base::FilePath tmp = path.AddExtensionASCII("tmp");
   int fd = open(tmp.value().c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -98,16 +104,16 @@ PreferenceControlTransportWorker::Prepare() {
   address.sun_family = AF_UNIX;
   if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) return result;
   memcpy(address.sun_path, inputs_.socket_path.value().c_str(), inputs_.socket_path.value().size() + 1);
-  struct stat socket_stat = {};
-  struct stat descriptor_stat = {};
-  struct stat credential_stat = {};
-  if (lstat(inputs_.socket_path.value().c_str(), &socket_stat) == 0 ||
-      lstat(inputs_.descriptor_path.value().c_str(), &descriptor_stat) == 0 ||
-      lstat(inputs_.credential_path.value().c_str(), &credential_stat) == 0) {
+  const PathCheck socket_check = CheckPath(inputs_.socket_path);
+  const PathCheck descriptor_check = CheckPath(inputs_.descriptor_path);
+  const PathCheck credential_check = CheckPath(inputs_.credential_path);
+  if (socket_check == PathCheck::kExists || descriptor_check == PathCheck::kExists ||
+      credential_check == PathCheck::kExists) {
     result.status = WorkerPrepareStatus::kCollision;
     return result;
   }
-  if (errno != ENOENT) {
+  if (socket_check == PathCheck::kError || descriptor_check == PathCheck::kError ||
+      credential_check == PathCheck::kError) {
     result.status = WorkerPrepareStatus::kSocket;
     return result;
   }
