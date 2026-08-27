@@ -81,4 +81,14 @@ source_set("preference_control_transport") {
     "//base",
   ]
   public_configs = [ ":preference_control_public" ]
+  deps = [ ":preference_control_transport_worker" ]
+}
+
+source_set("preference_control_transport_worker") {
+  sources = [
+    "limitless_preference_control_transport_worker.cc",
+    "limitless_preference_control_transport_worker.h",
+  ]
+  public_deps = [ "//base" ]
+  public_configs = [ ":preference_control_public" ]
 }
