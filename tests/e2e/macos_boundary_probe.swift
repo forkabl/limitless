@@ -141,9 +141,11 @@ private func externalAXSessionUnavailable(excluding targetPID: pid_t) -> Bool {
     owners.insert(pid)
     if owners.count >= 4 { break }
   }
+  let sortedOwners = owners.sorted()
+  var controlBundles = Set<String>()
   var controls = 0
   var unusable = 0
-  for pid in owners {
+  for pid in sortedOwners {
     let app = AXUIElementCreateApplication(pid)
     guard let native = try? nativeWindows(ownerPID: pid), !native.isEmpty else { continue }
     guard let windows = copyAttribute(app, kAXWindowsAttribute),
@@ -153,13 +155,23 @@ private func externalAXSessionUnavailable(excluding targetPID: pid_t) -> Bool {
         var owner: pid_t = 0
         return AXUIElementGetPid(element, &owner) == .success && owner == pid
       }
-    guard !pidCorrect.isEmpty else { continue }
-    controls += 1
-    if pidCorrect.allSatisfy({ stringAttribute($0, kAXRoleAttribute) != kAXWindowRole }) {
-      unusable += 1
+    guard !pidCorrect.isEmpty,
+          pidCorrect.allSatisfy({ stringAttribute($0, kAXRoleAttribute) == kAXApplicationRole }) else { continue }
+    var main: CFTypeRef?
+    var focused: CFTypeRef?
+    AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &main)
+    AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused)
+    for root in [main, focused].compactMap({ $0 }) {
+      guard CFGetTypeID(root) == AXUIElementGetTypeID() else { continue }
+      var owner: pid_t = 0
+      guard AXUIElementGetPid(root as! AXUIElement, &owner) == .success, owner == pid else { continue }
+      if stringAttribute(root as! AXUIElement, kAXRoleAttribute) == kAXWindowRole { return false }
     }
+    controls += 1
+    controlBundles.insert(String(pid))
+    unusable += 1
   }
-  return controls >= 2 && unusable == controls
+  return controls >= 2 && controlBundles.count >= 2 && unusable == controls
 }
 
 private func rawWindowRecordExists(
@@ -557,6 +569,8 @@ private func waitForBoundary(
   var lastAXWindowCount = 0
   var lastAXWindowRole = "missing"
   var wrongRootSamples = 0
+  var sawTargetWindowRole = false
+  var environmentChecked = false
   while Date() < deadline {
     let windows = try nativeWindows(ownerPID: pid)
     lastWindowCount = windows.count
@@ -565,9 +579,11 @@ private func waitForBoundary(
     if axWindows.count == 1 {
       lastAXWindowRole = stringAttribute(axWindows[0], kAXRoleAttribute) ?? "missing"
       wrongRootSamples = lastAXWindowRole == kAXWindowRole ? 0 : wrongRootSamples + 1
+      sawTargetWindowRole = sawTargetWindowRole || lastAXWindowRole == kAXWindowRole
     }
-    if windows.count == 1 && wrongRootSamples >= 3 &&
-       externalAXSessionUnavailable(excluding: pid) {
+    if !environmentChecked && windows.count == 1 && wrongRootSamples >= 3 &&
+       !sawTargetWindowRole && externalAXSessionUnavailable(excluding: pid) {
+      environmentChecked = true
       throw ProbeFailure(description: "AX session unavailable: multiple visible applications returned no AXWindow; unlock the session and retry")
     }
     if windows.count == 1, axWindows.count == 1, lastAXWindowRole == kAXWindowRole,
