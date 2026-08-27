@@ -6,6 +6,7 @@
 
 #include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
+#include "base/task/task_traits.h"
 #include "base/time/time.h"
 #include "limitless_preference_control_protocol.h"
 #include "limitless_preference_control_service.h"
@@ -82,6 +83,7 @@ void PreferenceControlTransport::StartAsync(StartCallback callback) {
   worker_ = base::SequenceBound<PreferenceControlTransportWorker>(
       base::ThreadPool::CreateSequencedTaskRunner(
           {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
+           base::WithBaseSyncPrimitives(),
            base::TaskShutdownBehavior::BLOCK_SHUTDOWN}),
       std::move(inputs), cancellation_);
   worker_.AsyncCall(&PreferenceControlTransportWorker::Prepare)

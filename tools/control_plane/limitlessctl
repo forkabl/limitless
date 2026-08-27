@@ -12,6 +12,7 @@ import stat
 import struct
 import sys
 import uuid
+from collections.abc import Callable
 
 
 PROTOCOL_VERSION = 1
@@ -28,6 +29,24 @@ class ControlError(Exception):
         self.detail = detail
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, item in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = item
+    return result
+
+
+def _verify_peer_pid(connection: socket.socket, expected_pid: int) -> None:
+    try:
+        peer_pid = struct.unpack("=i", connection.getsockopt(0, 0x002, 4))[0]
+    except (OSError, struct.error) as error:
+        raise ControlError("peer_identity_unavailable") from error
+    if peer_pid != expected_pid:
+        raise ControlError("peer_identity_mismatch")
+
+
 def _canonical_uuid(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -37,33 +56,94 @@ def _canonical_uuid(value: object) -> bool:
         return False
 
 
-def _safe_file(path: Path, expected_mode: int) -> os.stat_result:
+def _open_directory(path: Path, missing_code: str = "unsafe_discovery_entry") -> int:
+    fd = -1
     try:
-        metadata = path.lstat()
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        metadata = os.fstat(fd)
     except OSError as error:
-        raise ControlError("discovery_unavailable", str(error)) from error
-    if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        if fd >= 0:
+            os.close(fd)
+        if isinstance(error, FileNotFoundError):
+            raise ControlError(missing_code, str(error)) from error
+        raise ControlError("unsafe_discovery_entry", str(error)) from error
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        os.close(fd)
         raise ControlError("unsafe_discovery_entry")
-    if stat.S_IMODE(metadata.st_mode) != expected_mode:
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        os.close(fd)
         raise ControlError("unsafe_discovery_permissions")
-    return metadata
+    return fd
 
 
-def _runtime_directory(user_data_directory: Path) -> Path:
-    runtime = user_data_directory / RUNTIME_DIRECTORY
-    metadata = _safe_file(runtime, 0o700)
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise ControlError("unsafe_discovery_entry")
-    return runtime
+def _read_fd(fd: int, maximum: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) <= maximum:
+        try:
+            piece = os.read(fd, min(4096, maximum + 1 - len(chunks)))
+        except OSError as error:
+            raise ControlError("invalid_descriptor", str(error)) from error
+        if not piece:
+            return bytes(chunks)
+        chunks.extend(piece)
+    raise ControlError("invalid_descriptor")
 
 
-def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
-    metadata = _safe_file(path, 0o600)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
-        raise ControlError("invalid_descriptor")
+def _open_checked_at(
+    directory_fd: int,
+    name: str,
+    expected_type: Callable[[int], bool],
+    maximum: int,
+) -> tuple[int, bytes]:
+    if expected_type is stat.S_ISSOCK:
+        try:
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as error:
+            if isinstance(error, FileNotFoundError):
+                raise ControlError("invalid_descriptor") from error
+            raise ControlError("unsafe_discovery_entry", str(error)) from error
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise ControlError("unsafe_discovery_entry")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise ControlError("unsafe_discovery_permissions")
+        return -1, b""
+    fd = -1
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd
+        )
+        metadata = os.fstat(fd)
+    except OSError as error:
+        if fd >= 0:
+            os.close(fd)
+        if isinstance(error, FileNotFoundError):
+            raise ControlError("invalid_descriptor") from error
+        raise ControlError("unsafe_discovery_entry", str(error)) from error
+    if not expected_type(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        os.close(fd)
+        raise ControlError("unsafe_discovery_entry")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        os.close(fd)
+        raise ControlError("unsafe_discovery_permissions")
+    try:
+        return fd, _read_fd(fd, maximum)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _read_descriptor(
+    path: Path, runtime: Path, runtime_fd: int
+) -> tuple[dict[str, object] | None, tuple[str, str] | None]:
+    try:
+        descriptor_fd, descriptor_bytes = _open_checked_at(
+            runtime_fd, path.name, stat.S_ISREG, 4096
+        )
+        os.close(descriptor_fd)
+        value = json.loads(
+            descriptor_bytes.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
         raise ControlError("invalid_descriptor", str(error)) from error
     expected = {
         "version",
@@ -73,10 +153,18 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
         "credential_path",
         "pid",
     }
-    if not isinstance(value, dict) or set(value) != expected:
+    if not isinstance(value, dict):
         raise ControlError("invalid_descriptor")
-    if value["version"] != PROTOCOL_VERSION:
-        raise ControlError("incompatible_version")
+    if (
+        "version" not in value
+        or not isinstance(value["version"], int)
+        or isinstance(value["version"], bool)
+    ):
+        raise ControlError("invalid_descriptor")
+    if not isinstance(value.get("profile_id"), str) or not isinstance(
+        value.get("instance_id"), str
+    ):
+        raise ControlError("invalid_descriptor")
     if not _canonical_uuid(value["profile_id"]) or not _canonical_uuid(
         value["instance_id"]
     ):
@@ -84,35 +172,13 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
     endpoint_stem = f'{value["profile_id"]}.{value["instance_id"]}'
     if path.name != f"{endpoint_stem}.json":
         raise ControlError("invalid_descriptor")
-    pid = value["pid"]
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        raise ControlError("invalid_descriptor")
-    socket_path = Path(value["socket_path"])
-    local_socket_name = (
-        f"limitless-{os.geteuid()}-{pid}-"
-        f'{value["profile_id"][:8]}-{value["instance_id"][:8]}.sock'
-    )
-    socket_in_runtime = (
-        socket_path.parent == runtime
-        and socket_path.name
-        == f'{value["profile_id"][:8]}-{value["instance_id"][:8]}.sock'
-    )
-    socket_in_short_fallback = (
-        socket_path.parent == Path("/tmp") and socket_path.name == local_socket_name
-    )
-    if not socket_in_runtime and not socket_in_short_fallback:
-        raise ControlError("invalid_descriptor")
-    socket_metadata = _safe_file(socket_path, 0o600)
-    if not stat.S_ISSOCK(socket_metadata.st_mode):
-        raise ControlError("invalid_descriptor")
-    credential_path = Path(value["credential_path"])
+    pid = value.get("pid")
     if (
-        credential_path.parent != runtime
-        or credential_path.name != f"{endpoint_stem}.token"
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+        or pid > 2**31 - 1
     ):
-        raise ControlError("invalid_descriptor")
-    credential_metadata = _safe_file(credential_path, 0o600)
-    if not stat.S_ISREG(credential_metadata.st_mode) or credential_metadata.st_size > 256:
         raise ControlError("invalid_descriptor")
     try:
         os.kill(pid, 0)
@@ -120,35 +186,111 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
         raise ControlError("stale_instance") from error
     except PermissionError as error:
         raise ControlError("unsafe_discovery_entry") from error
-    return value
+    if value["version"] != PROTOCOL_VERSION:
+        return None, (value["profile_id"], value["instance_id"])
+    if set(value) != expected:
+        raise ControlError("invalid_descriptor")
+    for field in ("socket_path", "credential_path"):
+        raw = value[field]
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            raise ControlError("invalid_descriptor")
+    socket_path = Path(value["socket_path"])
+    local_socket_name = f's-{value["profile_id"][:12]}-{value["instance_id"]}'
+    socket_in_runtime = (
+        socket_path.parent == runtime
+        and socket_path.name
+        == f'{value["profile_id"][:8]}-{value["instance_id"][:8]}.sock'
+    )
+    fallback_parent = Path(f"/tmp/limitless-{os.geteuid()}")
+    socket_in_short_fallback = (
+        socket_path.parent == fallback_parent and socket_path.name == local_socket_name
+    )
+    if not socket_in_runtime and not socket_in_short_fallback:
+        raise ControlError("invalid_descriptor")
+    socket_parent = runtime if socket_in_runtime else fallback_parent
+    socket_parent_fd = (
+        runtime_fd
+        if socket_in_runtime
+        else _open_directory(socket_parent, missing_code="invalid_descriptor")
+    )
+    try:
+        socket_fd, _ = _open_checked_at(
+            socket_parent_fd, socket_path.name, stat.S_ISSOCK, 0
+        )
+        if socket_fd >= 0:
+            os.close(socket_fd)
+    finally:
+        if socket_parent_fd != runtime_fd:
+            os.close(socket_parent_fd)
+    credential_path = Path(value["credential_path"])
+    if (
+        credential_path.parent != runtime
+        or credential_path.name != f"{endpoint_stem}.token"
+    ):
+        raise ControlError("invalid_descriptor")
+    credential_fd, _ = _open_checked_at(
+        runtime_fd, credential_path.name, stat.S_ISREG, 256
+    )
+    os.close(credential_fd)
+    return value, None
 
 
-def _descriptors(user_data_directory: Path) -> list[dict[str, object]]:
-    runtime = _runtime_directory(user_data_directory)
+def _descriptors(
+    runtime: Path, runtime_fd: int
+) -> tuple[list[dict[str, object]], set[tuple[str, str]]]:
     descriptors: list[dict[str, object]] = []
-    for path in sorted(runtime.glob("*.json")):
+    incompatible: set[tuple[str, str]] = set()
+    try:
+        names = sorted(
+            name for name in os.listdir(runtime_fd) if name.endswith(".json")
+        )
+    except FileNotFoundError:
+        return [], incompatible
+    except OSError as error:
+        raise ControlError("discovery_unavailable", str(error)) from error
+    for name in names:
+        path = runtime / name
         try:
-            descriptors.append(_read_descriptor(path, runtime))
+            descriptor, target = _read_descriptor(path, runtime, runtime_fd)
+            if descriptor is not None:
+                descriptors.append(descriptor)
+            if target is not None:
+                incompatible.add(target)
         except ControlError as error:
             if error.code not in {"stale_instance", "invalid_descriptor"}:
                 raise
-    return descriptors
+    return descriptors, incompatible
 
 
 def _select_descriptor(
-    user_data_directory: Path,
+    runtime: Path,
+    runtime_fd: int,
     profile_identifier: str | None,
     instance_identifier: str | None,
 ) -> dict[str, object]:
-    matches = _descriptors(user_data_directory)
+    matches, incompatible = _descriptors(runtime, runtime_fd)
     if profile_identifier is not None:
         if not _canonical_uuid(profile_identifier):
             raise ControlError("invalid_profile")
-        matches = [entry for entry in matches if entry["profile_id"] == profile_identifier]
+        matches = [
+            entry for entry in matches if entry["profile_id"] == profile_identifier
+        ]
     if instance_identifier is not None:
         if not _canonical_uuid(instance_identifier):
             raise ControlError("invalid_instance")
-        matches = [entry for entry in matches if entry["instance_id"] == instance_identifier]
+        matches = [
+            entry for entry in matches if entry["instance_id"] == instance_identifier
+        ]
+    candidate_incompatible = [
+        target
+        for target in incompatible
+        if (profile_identifier is None or target[0] == profile_identifier)
+        and (instance_identifier is None or target[1] == instance_identifier)
+    ]
+    if not matches and len(candidate_incompatible) == 1:
+        raise ControlError("incompatible_version")
+    if len(matches) + len(candidate_incompatible) > 1:
+        raise ControlError("ambiguous_profile")
     if not matches:
         raise ControlError("profile_unavailable")
     if len(matches) != 1:
@@ -174,6 +316,7 @@ def _exchange(descriptor: dict[str, object], request: dict[str, object]) -> obje
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(IO_TIMEOUT_SECONDS)
             connection.connect(str(descriptor["socket_path"]))
+            _verify_peer_pid(connection, int(descriptor["pid"]))
             connection.sendall(struct.pack("!I", len(encoded)) + encoded)
             response_size = struct.unpack("!I", _read_exact(connection, 4))[0]
             if response_size == 0 or response_size > MAXIMUM_RESPONSE_BYTES:
@@ -216,15 +359,28 @@ def _preference_request(
     return request
 
 
-def _read_capability(descriptor: dict[str, object]) -> str:
+def _read_capability(descriptor: dict[str, object], runtime_fd: int) -> str:
+    fd = -1
     try:
-        capability = Path(descriptor["credential_path"]).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
+        fd, data = _open_checked_at(
+            runtime_fd, Path(descriptor["credential_path"]).name, stat.S_ISREG, 256
+        )
+        capability = data.decode("utf-8")
+    except ControlError as error:
+        if error.code in {"unsafe_discovery_entry", "unsafe_discovery_permissions"}:
+            raise
         raise ControlError("capability_unavailable") from error
+    except UnicodeError as error:
+        raise ControlError("capability_unavailable") from error
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if (
         not capability
         or len(capability.encode("utf-8")) > 256
-        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in capability)
+        or any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in capability
+        )
     ):
         raise ControlError("capability_unavailable")
     return capability
@@ -257,7 +413,12 @@ def main(argv: list[str]) -> int:
     arguments = _parser().parse_args(argv)
     try:
         if arguments.command == "discover":
-            entries = _descriptors(arguments.user_data_dir)
+            runtime = arguments.user_data_dir / RUNTIME_DIRECTORY
+            runtime_fd = _open_directory(runtime, missing_code="discovery_unavailable")
+            try:
+                entries, _ = _descriptors(runtime, runtime_fd)
+            finally:
+                os.close(runtime_fd)
             _emit(
                 {
                     "version": PROTOCOL_VERSION,
@@ -273,20 +434,27 @@ def main(argv: list[str]) -> int:
                 }
             )
             return 0
-        descriptor = _select_descriptor(
-            arguments.user_data_dir, arguments.profile, arguments.instance
-        )
-        capability = _read_capability(descriptor)
-        operation = "read" if arguments.preference_command == "get" else "write"
-        value = getattr(arguments, "value", None)
-        result = _exchange(
-            descriptor,
-            _preference_request(
-                descriptor, capability, operation, arguments.key, value
-            ),
-        )
+        runtime = arguments.user_data_dir / RUNTIME_DIRECTORY
+        runtime_fd = _open_directory(runtime, missing_code="discovery_unavailable")
+        try:
+            descriptor = _select_descriptor(
+                runtime, runtime_fd, arguments.profile, arguments.instance
+            )
+            capability = _read_capability(descriptor, runtime_fd)
+            operation = "read" if arguments.preference_command == "get" else "write"
+            value = getattr(arguments, "value", None)
+            result = _exchange(
+                descriptor,
+                _preference_request(
+                    descriptor, capability, operation, arguments.key, value
+                ),
+            )
+        finally:
+            os.close(runtime_fd)
         _emit(result)
-        return 0 if isinstance(result, dict) and result.get("status") == "success" else 3
+        return (
+            0 if isinstance(result, dict) and result.get("status") == "success" else 3
+        )
     except ControlError as error:
         result: dict[str, object] = {
             "version": PROTOCOL_VERSION,
