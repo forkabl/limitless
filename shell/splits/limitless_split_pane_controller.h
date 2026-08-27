@@ -15,6 +15,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+#include "components/split_tabs/split_tab_id.h"
 #include "components/tabs/public/tab_interface.h"
 
 class BrowserWindowInterface;
@@ -74,6 +75,7 @@ struct SplitPanePairTarget {
 };
 
 struct SplitPaneProjection {
+  std::string split_instance_identifier;
   std::string pair_identifier;
   std::string first_tab_identifier;
   std::string second_tab_identifier;
@@ -174,6 +176,17 @@ class SplitPaneController final : public TabStripModelObserver {
   bool reconciling_ = false;
   bool reconcile_requested_ = false;
   uint64_t reconcile_generation_ = 0;
+  // Ephemeral identity for each live Chromium split.  This survives visual
+  // changes and is discarded when the controller stops or the split vanishes.
+  struct SplitInstanceEntry {
+    std::string identifier;
+    std::pair<int32_t, int32_t> canonical_members;
+  };
+  std::string GetOrCreateSplitInstanceIdentifier(
+      split_tabs::SplitTabId split_id,
+      std::pair<int32_t, int32_t> canonical_members) const;
+  mutable std::map<split_tabs::SplitTabId, SplitInstanceEntry>
+      split_instance_identifiers_;
   raw_ptr<BrowserWindowInterface> browser_window_;
   raw_ptr<TabListInterface> tab_list_;
   raw_ptr<TabStripModel> tab_strip_model_;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <utility>
 
@@ -126,7 +127,9 @@ SplitPaneWindowSnapshot SplitPaneController::GetSnapshot() const {
   }
 
   tabs::TabInterface* active_tab = tab_strip_model_->GetActiveTab();
+  std::set<split_tabs::SplitTabId> live_split_ids;
   for (const split_tabs::SplitTabId split_id : tab_strip_model_->ListSplits()) {
+    live_split_ids.insert(split_id);
     const split_tabs::SplitTabData* split_data =
         tab_strip_model_->GetSplitData(split_id);
     if (!split_data) {
@@ -136,6 +139,11 @@ SplitPaneWindowSnapshot SplitPaneController::GetSnapshot() const {
     if (members.size() != 2u || !members[0] || !members[1]) {
       continue;
     }
+    const int32_t first_member = members[0]->GetHandle().raw_value();
+    const int32_t second_member = members[1]->GetHandle().raw_value();
+    const auto canonical_members =
+        std::make_pair(std::min(first_member, second_member),
+                       std::max(first_member, second_member));
     const auto first =
         visible_identifiers.find(members[0]->GetHandle().raw_value());
     const auto second =
@@ -151,6 +159,8 @@ SplitPaneWindowSnapshot SplitPaneController::GetSnapshot() const {
       continue;
     }
     SplitPaneProjection projection{
+        .split_instance_identifier =
+            GetOrCreateSplitInstanceIdentifier(split_id, canonical_members),
         .pair_identifier = MakePairIdentifier(first->second, second->second),
         .first_tab_identifier = first->second,
         .second_tab_identifier = second->second,
@@ -164,8 +174,30 @@ SplitPaneWindowSnapshot SplitPaneController::GetSnapshot() const {
     }
     snapshot.splits.push_back(std::move(projection));
   }
+  for (auto it = split_instance_identifiers_.begin();
+       it != split_instance_identifiers_.end();) {
+    if (!live_split_ids.contains(it->first)) {
+      it = split_instance_identifiers_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 
   return snapshot;
+}
+
+std::string SplitPaneController::GetOrCreateSplitInstanceIdentifier(
+    split_tabs::SplitTabId split_id,
+    std::pair<int32_t, int32_t> canonical_members) const {
+  auto found = split_instance_identifiers_.find(split_id);
+  if (found != split_instance_identifiers_.end() &&
+      found->second.canonical_members == canonical_members) {
+    return found->second.identifier;
+  }
+  std::string identifier = base::Uuid::GenerateRandomV4().AsLowercaseString();
+  split_instance_identifiers_[split_id] =
+      SplitInstanceEntry{identifier, canonical_members};
+  return identifier;
 }
 
 std::map<std::string, SplitPaneOperationStatus>
@@ -509,6 +541,7 @@ void SplitPaneController::Stop() {
   browser_window_ = nullptr;
   state_changed_.Reset();
   focus_controller_resolver_.Reset();
+  split_instance_identifiers_.clear();
 }
 
 SplitPaneController* SplitPaneController::From(
@@ -548,6 +581,7 @@ void SplitPaneController::OnTabStripModelDestroyed(
   ++reconcile_generation_;
   weak_ptr_factory_.InvalidateWeakPtrs();
   reconcile_scheduled_ = false;
+  split_instance_identifiers_.clear();
   tab_strip_model_ = nullptr;
   tab_list_ = nullptr;
   base::RepeatingClosure state_changed = state_changed_;
