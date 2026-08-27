@@ -67,9 +67,12 @@ Limitless persists no split model. The next product-facing priority from
 `docs/features.md` is the remaining hostile split lifecycle. Prompt anchoring
 and controlled renderer crash/reload recovery are green. The tabless shell no
 longer crashes on native fullscreen entry, while completion remains externally
-red at the same waiter as stock Chromium. Continue with teardown, private and
-popup windows, and supported cross-window transfer. Do not replace this
-ordering with the historical phase text below when continuing work.
+red at the same waiter as stock Chromium. Split-window teardown, bounded typed
+same-regular-profile transfer, single-member authoritative dissolution, and
+private/popup product boundaries are now green without parallel transfer state.
+Continue with the external fullscreen, Mac arm64 system-drag, hardware-input,
+VoiceOver, AX, IME, and exact-window pixel gates. Do not replace this ordering
+with the historical phase text below when continuing work.
 
 ## Fixed project context
 

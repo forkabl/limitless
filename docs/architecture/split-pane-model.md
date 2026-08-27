@@ -312,25 +312,40 @@ state, and the recovered page receives focus and synthesized input. macOS
 SadTab keyboard focus remains an explicit upstream red gate. The real
 fullscreen path no longer crashes while creating an absent horizontal-tab
 overlay, but native transition completion remains externally red because the
-identical stock Chromium control stalls in the same environment. Follow-up
-bounded journeys must cover the remaining hostile multiwindow,
-regular-profile, cross-profile, private, popup, teardown, and supported
-transfer cases without counting unrelated workspace-only coverage as split
-acceptance.
+identical stock Chromium control stalls in the same environment. The hostile
+window checkpoint now proves that closing a split window cancels pending rail
+projection without stale callbacks or damage to another window's exact split.
+It also proves the bounded transfer policy through Chromium's typed APIs: an
+eligible whole pair moving between two normal windows in the same regular
+profile retains its live native split identity, authoritative member order,
+layout, ratio, selected member, product tab UUIDs, and destination workspace;
+moving one member dissolves the pair authoritatively while preserving both real
+pages and product identities. Limitless stores no transfer state.
+
+Private normal windows may retain Chromium-owned ephemeral splits, but product
+split commands, projection, and persistence reject them. Popup windows receive
+no native rail, workspace controller, or split controller, and the product rail
+factory fails closed when called directly for a popup. These journeys also
+prove that the exact regular-window sentinel pair is unchanged. Cross-profile,
+private, popup, stale, grouped partial-pair, noneditable, and drag-mediated
+product transfers remain unsupported rather than receiving a parallel product
+implementation.
 
 The tests may inspect `MultiContentsView` and Chromium model state after the
 native action, but must not use those internals to perform the user action.
 Retries remain disabled, launcher jobs remain one, and every journey has an
 external watchdog.
 
-The cross-window transfer test is wired through Chromium's real desktop Views
-horizontal tab strip so supported environments can exercise the pinned drag
-controller and generic editability seam. The current Mac arm64 native system-
-DnD route is an external red gate, so deterministic controller and SwiftUI tests
-carry the local transfer and reconciliation evidence. None of this is a claim
-that the native Limitless rail exposes a cross-window drag route. Native rail
-split creation, focus, layout, ratio, swap, unsplit, close, workspace switch,
-and workspace move remain covered through their real SwiftUI controls.
+The supported cross-window transfer proof uses Chromium's existing typed window
+move APIs after strict live-window, profile, editability, group, and membership
+preflight. The generic desktop Views drag test continues to cover the pinned
+drag-controller editability seam where its platform harness is supported. The
+current Mac arm64 native system-DnD route is an external red gate, so it is not
+counted as transfer acceptance and no raw-handle drag command is invented.
+None of this is a claim that the native Limitless rail exposes a cross-window
+drag route. Native rail split creation, focus, layout, ratio, swap, unsplit,
+close, workspace switch, and workspace move remain covered through their real
+SwiftUI controls.
 
 Upstream `MultiContentsView` currently retains rounded content corners,
 insets, a rounded divider handle, and Chrome mini-toolbar surfaces. Those are
