@@ -11,9 +11,11 @@
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/process/process_handle.h"
+#include "base/synchronization/waitable_event.h"
 #include "base/task/thread_pool.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
+#include "base/threading/thread_restrictions.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace limitless {
@@ -443,16 +445,21 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   auto request = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
                                                       base::Seconds(2));
   base::test::TestFuture<std::string> future;
+  base::WaitableEvent started;
   base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE, {base::MayBlock()},
+      FROM_HERE, {base::MayBlock(), base::WithBaseSyncPrimitives()},
       base::BindOnce(
-          [](scoped_refptr<PendingRequest> pending) {
+          [](scoped_refptr<PendingRequest> pending,
+             base::WaitableEvent* started) {
+            base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync;
+            started->Signal();
             std::string response;
             pending->Wait(&response);
             return response;
           },
-          request),
+          request, &started),
       future.GetCallback());
+  started.Wait();
   EXPECT_TRUE(request->TryBeginHandling());
   EXPECT_TRUE(request->Complete("ok"));
   EXPECT_EQ(future.Take(), "ok");
@@ -460,19 +467,104 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   auto cancelled = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
                                                         base::Seconds(2));
   base::test::TestFuture<bool> cancelled_future;
+  base::WaitableEvent cancelled_started;
   base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE, {base::MayBlock()},
+      FROM_HERE, {base::MayBlock(), base::WithBaseSyncPrimitives()},
       base::BindOnce(
-          [](scoped_refptr<PendingRequest> p) {
+          [](scoped_refptr<PendingRequest> p, base::WaitableEvent* started) {
+            base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync;
+            started->Signal();
             std::string s;
             return p->Wait(&s);
           },
-          cancelled),
+          cancelled, &cancelled_started),
       cancelled_future.GetCallback());
+  cancelled_started.Wait();
   cancelled->Cancel();
   EXPECT_FALSE(cancelled_future.Take());
   EXPECT_FALSE(cancelled->TryBeginHandling());
   EXPECT_FALSE(cancelled->Complete("late"));
 }
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     PendingRequestDeadlineCancelsQueuedHandling) {
+  base::test::TaskEnvironment env;
+  auto p = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
+                                                base::Milliseconds(10));
+  base::test::TestFuture<bool> f;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::WithBaseSyncPrimitives()},
+      base::BindOnce(
+          [](scoped_refptr<PendingRequest> r) {
+            base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync;
+            std::string s;
+            return r->Wait(&s);
+          },
+          p),
+      f.GetCallback());
+  EXPECT_FALSE(f.Take());
+  EXPECT_FALSE(p->TryBeginHandling());
+  EXPECT_FALSE(p->Complete("late"));
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     CancellationShutsDownRegisteredSocket) {
+  base::test::TaskEnvironment env;
+  int fds[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  auto state = base::MakeRefCounted<TransportCancellationState>();
+  uint64_t token = state->InstallAcceptedFd(fds[0]);
+  base::test::TestFuture<bool> f;
+  base::ThreadPool::PostTaskAndReplyWithResult(FROM_HERE, {base::MayBlock()},
+                                               base::BindOnce(
+                                                   [](int fd) {
+                                                     char c;
+                                                     return read(fd, &c, 1) ==
+                                                            0;
+                                                   },
+                                                   fds[1]),
+                                               f.GetCallback());
+  state->Cancel();
+  EXPECT_TRUE(f.Take());
+  state->ClearActive(token);
+  close(fds[1]);
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     StaleRegistrationCannotClearNewerConnection) {
+  base::test::TaskEnvironment env;
+  int first[2], second[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, first), 0);
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, second), 0);
+  auto state = base::MakeRefCounted<TransportCancellationState>();
+  auto pending1 = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
+                                                       base::Seconds(2));
+  auto pending2 = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
+                                                       base::Seconds(2));
+  uint64_t token1 = state->InstallAcceptedFd(first[0]);
+  ASSERT_TRUE(state->InstallPendingRequest(token1, pending1));
+  uint64_t token2 = state->InstallAcceptedFd(second[0]);
+  ASSERT_TRUE(state->InstallPendingRequest(token2, pending2));
+  EXPECT_FALSE(pending1->TryBeginHandling());
+  state->ClearActive(token1);
+  base::test::TestFuture<bool> eof;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::WithBaseSyncPrimitives()},
+      base::BindOnce(
+          [](int fd) {
+            char c;
+            return read(fd, &c, 1) == 0;
+          },
+          second[1]),
+      eof.GetCallback());
+  state->Cancel();
+  EXPECT_TRUE(eof.Take());
+  EXPECT_FALSE(pending2->TryBeginHandling());
+  EXPECT_FALSE(pending2->Complete("late"));
+  close(first[0]);
+  close(first[1]);
+  close(second[0]);
+  close(second[1]);
+}
+
 }  // namespace
 }  // namespace limitless
