@@ -140,12 +140,15 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
 
   const std::string profile(backend_->profile_identifier());
   const std::string instance(backend_->profile_instance_identifier());
-  const std::string endpoint_name = profile.substr(0, 8) + "-" +
-                                    instance.substr(0, 8);
+  const std::string endpoint_name =
+      profile.substr(0, 8) + "-" + instance.substr(0, 8);
   socket_path_ = runtime_directory_.AppendASCII(endpoint_name + ".sock");
   descriptor_path_ =
       runtime_directory_.AppendASCII(profile + "." + instance + ".json");
-  if (socket_path_.value().size() >= sizeof(sockaddr_un::sun_path)) {
+  credential_path_ =
+      runtime_directory_.AppendASCII(profile + "." + instance + ".token");
+  sockaddr_un address = {};
+  if (socket_path_.value().size() >= sizeof(address.sun_path)) {
     return PreferenceControlTransportStartStatus::kPathTooLong;
   }
 
@@ -156,14 +159,12 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
   fcntl(listen_fd_.get(), F_SETFD,
         fcntl(listen_fd_.get(), F_GETFD) | FD_CLOEXEC);
 
-  sockaddr_un address = {};
   address.sun_family = AF_UNIX;
   std::memcpy(address.sun_path, socket_path_.value().c_str(),
               socket_path_.value().size() + 1);
   unlink(socket_path_.value().c_str());
-  const socklen_t address_length =
-      static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
-                             socket_path_.value().size() + 1);
+  const socklen_t address_length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + socket_path_.value().size() + 1);
   if (bind(listen_fd_.get(), reinterpret_cast<sockaddr*>(&address),
            address_length) != 0 ||
       chmod(socket_path_.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
@@ -172,14 +173,21 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kBindFailed;
   }
+  if (!WriteCredential()) {
+    listen_fd_.reset();
+    unlink(socket_path_.value().c_str());
+    return PreferenceControlTransportStartStatus::kCredentialWriteFailed;
+  }
   if (!WriteDescriptor()) {
     listen_fd_.reset();
+    base::DeleteFile(credential_path_);
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kDescriptorWriteFailed;
   }
   if (!io_thread_.Start()) {
     listen_fd_.reset();
     base::DeleteFile(descriptor_path_);
+    base::DeleteFile(credential_path_);
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kThreadStartFailed;
   }
@@ -189,7 +197,7 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
   io_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&PreferenceControlTransport::AcceptLoop,
-                     base::Unretained(this)));
+                     base::Unretained(this), weak_factory_.GetWeakPtr()));
   return PreferenceControlTransportStartStatus::kSuccess;
 }
 
@@ -205,6 +213,7 @@ void PreferenceControlTransport::Stop() {
   }
   io_thread_.Stop();
   base::DeleteFile(descriptor_path_);
+  base::DeleteFile(credential_path_);
   base::DeleteFile(socket_path_);
   running_ = false;
 }
@@ -227,6 +236,7 @@ bool PreferenceControlTransport::WriteDescriptor() {
   descriptor.Set("profile_id", backend_->profile_identifier());
   descriptor.Set("instance_id", backend_->profile_instance_identifier());
   descriptor.Set("socket_path", socket_path_.value());
+  descriptor.Set("credential_path", credential_path_.value());
   descriptor.Set("pid", base::GetCurrentProcId());
   std::string serialized;
   if (!base::JSONWriter::Write(descriptor, &serialized)) {
@@ -242,7 +252,21 @@ bool PreferenceControlTransport::WriteDescriptor() {
   return true;
 }
 
-void PreferenceControlTransport::AcceptLoop() {
+bool PreferenceControlTransport::WriteCredential() {
+  const base::FilePath temporary = credential_path_.AddExtensionASCII("tmp");
+  base::DeleteFile(temporary);
+  const std::string credential(backend_->capability());
+  if (!base::WriteFile(temporary, credential) ||
+      chmod(temporary.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
+      !base::ReplaceFile(temporary, credential_path_, nullptr)) {
+    base::DeleteFile(temporary);
+    return false;
+  }
+  return true;
+}
+
+void PreferenceControlTransport::AcceptLoop(
+    base::WeakPtr<PreferenceControlTransport> origin_weak_ptr) {
   while (!stopping_.load(std::memory_order_acquire)) {
     base::ScopedFD connection(accept(listen_fd_.get(), nullptr, nullptr));
     if (!connection.is_valid()) {
@@ -276,7 +300,7 @@ void PreferenceControlTransport::AcceptLoop() {
     origin_task_runner_->PostTask(
         FROM_HERE,
         base::BindOnce(&PreferenceControlTransport::HandleRequestOnOrigin,
-                       weak_factory_.GetWeakPtr(), std::move(payload), pending));
+                       origin_weak_ptr, std::move(payload), pending));
     std::unique_lock lock(pending->mutex);
     if (!pending->ready.wait_for(lock, kTransportIoTimeout.ToChrono(),
                                  [&pending] { return pending->response; })) {
@@ -295,7 +319,8 @@ void PreferenceControlTransport::HandleRequestOnOrigin(
     response = SerializeParseError(parsed.status);
   } else {
     PreferenceControlService service(backend_);
-    response = SerializePreferenceControlResult(service.Execute(*parsed.request));
+    response =
+        SerializePreferenceControlResult(service.Execute(*parsed.request));
   }
   {
     std::lock_guard lock(pending->mutex);

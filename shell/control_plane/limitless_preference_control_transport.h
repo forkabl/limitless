@@ -6,6 +6,7 @@
 #define LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_TRANSPORT_H_
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 
 #include "base/files/file_path.h"
@@ -19,8 +20,7 @@
 namespace limitless {
 
 inline constexpr size_t kMaximumPreferenceTransportResponseBytes = 32 * 1024;
-inline constexpr char kPreferenceControlRuntimeDirectory[] =
-    "LimitlessControl";
+inline constexpr char kPreferenceControlRuntimeDirectory[] = "LimitlessControl";
 
 enum class PreferenceControlTransportStartStatus {
   kSuccess,
@@ -29,6 +29,7 @@ enum class PreferenceControlTransportStartStatus {
   kInvalidRuntimeDirectory,
   kPathTooLong,
   kBindFailed,
+  kCredentialWriteFailed,
   kDescriptorWriteFailed,
   kThreadStartFailed,
 };
@@ -53,14 +54,16 @@ class PreferenceControlTransport {
   bool running() const { return running_; }
   const base::FilePath& runtime_directory() const { return runtime_directory_; }
   const base::FilePath& descriptor_path() const { return descriptor_path_; }
+  const base::FilePath& credential_path() const { return credential_path_; }
   const base::FilePath& socket_path() const { return socket_path_; }
 
  private:
   struct PendingResponse;
 
   bool PrepareRuntimeDirectory();
+  bool WriteCredential();
   bool WriteDescriptor();
-  void AcceptLoop();
+  void AcceptLoop(base::WeakPtr<PreferenceControlTransport> origin_weak_ptr);
   void HandleRequestOnOrigin(std::string payload,
                              std::shared_ptr<PendingResponse> pending);
 
@@ -68,6 +71,7 @@ class PreferenceControlTransport {
   const base::FilePath runtime_directory_;
   const scoped_refptr<base::SingleThreadTaskRunner> origin_task_runner_;
   base::FilePath descriptor_path_;
+  base::FilePath credential_path_;
   base::FilePath socket_path_;
   base::ScopedFD listen_fd_;
   base::Thread io_thread_{"LimitlessPreferenceControl"};

@@ -70,6 +70,7 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
         "profile_id",
         "instance_id",
         "socket_path",
+        "credential_path",
         "pid",
     }
     if not isinstance(value, dict) or set(value) != expected:
@@ -88,6 +89,12 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
         raise ControlError("invalid_descriptor")
     socket_metadata = _safe_file(socket_path, 0o600)
     if not stat.S_ISSOCK(socket_metadata.st_mode):
+        raise ControlError("invalid_descriptor")
+    credential_path = Path(value["credential_path"])
+    if credential_path.parent != runtime or credential_path.suffix != ".token":
+        raise ControlError("invalid_descriptor")
+    credential_metadata = _safe_file(credential_path, 0o600)
+    if not stat.S_ISREG(credential_metadata.st_mode) or credential_metadata.st_size > 256:
         raise ControlError("invalid_descriptor")
     try:
         os.kill(pid, 0)
@@ -191,16 +198,25 @@ def _preference_request(
     return request
 
 
+def _read_capability(descriptor: dict[str, object]) -> str:
+    try:
+        capability = Path(descriptor["credential_path"]).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ControlError("capability_unavailable") from error
+    if (
+        not capability
+        or len(capability.encode("utf-8")) > 256
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in capability)
+    ):
+        raise ControlError("capability_unavailable")
+    return capability
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="limitlessctl")
     parser.add_argument("--user-data-dir", type=Path, required=True)
     parser.add_argument("--profile")
     parser.add_argument("--instance")
-    parser.add_argument(
-        "--capability-stdin",
-        action="store_true",
-        help="read the capability from one line on stdin",
-    )
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("discover")
     preferences = subcommands.add_parser("preferences")
@@ -213,20 +229,6 @@ def _parser() -> argparse.ArgumentParser:
     set_value.add_argument("key", choices=["rail_density"])
     set_value.add_argument("value", choices=["compact", "comfortable"])
     return parser
-
-
-def _read_capability(from_stdin: bool) -> str:
-    if from_stdin:
-        capability = sys.stdin.readline(258).rstrip("\r\n")
-    else:
-        capability = os.environ.get("LIMITLESS_CONTROL_CAPABILITY", "")
-    if (
-        not capability
-        or len(capability.encode("utf-8")) > 256
-        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in capability)
-    ):
-        raise ControlError("capability_unavailable")
-    return capability
 
 
 def _emit(value: object) -> None:
@@ -256,7 +258,7 @@ def main(argv: list[str]) -> int:
         descriptor = _select_descriptor(
             arguments.user_data_dir, arguments.profile, arguments.instance
         )
-        capability = _read_capability(arguments.capability_stdin)
+        capability = _read_capability(descriptor)
         operation = "read" if arguments.preference_command == "get" else "write"
         value = getattr(arguments, "value", None)
         _emit(
