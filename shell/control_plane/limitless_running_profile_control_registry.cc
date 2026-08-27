@@ -23,7 +23,7 @@ struct RunningProfileControlRegistry::ProfileEntry {
                 base::BindRepeating(&ProfileEntry::NotifyValueChanged,
                                     base::Unretained(this))),
         transport(&backend, profile->GetPath().DirName()) {
-    transport.Start();
+    transport_start_status = transport.Start();
   }
 
   void NotifyValueChanged(const EffectivePreferenceValue& value) {
@@ -33,6 +33,8 @@ struct RunningProfileControlRegistry::ProfileEntry {
   const raw_ptr<Profile> profile;
   ProfilePreferenceControlBackend backend;
   PreferenceControlTransport transport;
+  PreferenceControlTransportStartStatus transport_start_status =
+      PreferenceControlTransportStartStatus::kThreadStartFailed;
   std::vector<raw_ptr<BrowserWindowInterface>> windows;
   base::RepeatingCallbackList<void(const EffectivePreferenceValue&)>
       value_changed_callbacks;
@@ -110,6 +112,11 @@ RunningProfileControlRegistry::RegisterWindow(
   if (!entry) {
     entries_.push_back(std::make_unique<ProfileEntry>(profile));
     entry = entries_.back().get();
+    if (entry->transport_start_status !=
+        PreferenceControlTransportStartStatus::kSuccess) {
+      entries_.pop_back();
+      return nullptr;
+    }
   }
   if (std::ranges::contains(entry->windows, browser_window)) {
     return nullptr;

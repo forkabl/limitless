@@ -24,7 +24,6 @@
 #include <string>
 #include <utility>
 
-#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
@@ -241,14 +240,14 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
   }
   if (!WriteDescriptor()) {
     listen_fd_.reset();
-    base::DeleteFile(credential_path_);
+    unlink(credential_path_.value().c_str());
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kDescriptorWriteFailed;
   }
   if (!io_thread_.Start()) {
     listen_fd_.reset();
-    base::DeleteFile(descriptor_path_);
-    base::DeleteFile(credential_path_);
+    unlink(descriptor_path_.value().c_str());
+    unlink(credential_path_.value().c_str());
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kThreadStartFailed;
   }
@@ -295,14 +294,15 @@ void PreferenceControlTransport::Stop() {
   io_thread_.Stop();
   listen_descriptor_.store(-1, std::memory_order_release);
   listen_fd_.reset();
-  base::DeleteFile(descriptor_path_);
-  base::DeleteFile(credential_path_);
-  base::DeleteFile(socket_path_);
+  unlink(descriptor_path_.value().c_str());
+  unlink(credential_path_.value().c_str());
+  unlink(socket_path_.value().c_str());
   running_ = false;
 }
 
 bool PreferenceControlTransport::PrepareRuntimeDirectory() {
-  if (!base::CreateDirectory(runtime_directory_)) {
+  if (mkdir(runtime_directory_.value().c_str(), S_IRWXU) != 0 &&
+      errno != EEXIST) {
     return false;
   }
   struct stat metadata = {};
