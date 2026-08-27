@@ -59,6 +59,7 @@ source_set("running_profile_control_registry") {
 
   public_deps = [
     ":profile_preference_backend",
+    ":preference_control_transport",
     "//base",
   ]
   public_configs = [ ":preference_control_public" ]

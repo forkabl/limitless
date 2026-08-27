@@ -70,6 +70,42 @@ bool WriteExactly(int fd, const void* source, size_t length) {
   return true;
 }
 
+bool WriteFileExactly(int fd, std::string_view contents) {
+  while (!contents.empty()) {
+    const ssize_t write_size = write(fd, contents.data(), contents.size());
+    if (write_size < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    contents.remove_prefix(static_cast<size_t>(write_size));
+  }
+  return true;
+}
+
+bool WritePrivateFileAtomically(const base::FilePath& path,
+                                std::string_view contents) {
+  const base::FilePath temporary = path.AddExtensionASCII("tmp");
+  unlink(temporary.value().c_str());
+  base::ScopedFD temporary_fd(open(
+      temporary.value().c_str(),
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR));
+  if (!temporary_fd.is_valid() ||
+      !WriteFileExactly(temporary_fd.get(), contents) ||
+      fsync(temporary_fd.get()) != 0) {
+    temporary_fd.reset();
+    unlink(temporary.value().c_str());
+    return false;
+  }
+  temporary_fd.reset();
+  if (rename(temporary.value().c_str(), path.value().c_str()) != 0) {
+    unlink(temporary.value().c_str());
+    return false;
+  }
+  return true;
+}
+
 void ConfigureIoDeadline(int fd) {
   const timeval timeout = {
       .tv_sec = static_cast<time_t>(kTransportIoTimeout.InSeconds()),
@@ -242,27 +278,11 @@ bool PreferenceControlTransport::WriteDescriptor() {
   if (!base::JSONWriter::Write(descriptor, &serialized)) {
     return false;
   }
-  const base::FilePath temporary = descriptor_path_.AddExtensionASCII("tmp");
-  if (!base::WriteFile(temporary, serialized) ||
-      chmod(temporary.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
-      !base::ReplaceFile(temporary, descriptor_path_, nullptr)) {
-    base::DeleteFile(temporary);
-    return false;
-  }
-  return true;
+  return WritePrivateFileAtomically(descriptor_path_, serialized);
 }
 
 bool PreferenceControlTransport::WriteCredential() {
-  const base::FilePath temporary = credential_path_.AddExtensionASCII("tmp");
-  base::DeleteFile(temporary);
-  const std::string credential(backend_->capability());
-  if (!base::WriteFile(temporary, credential) ||
-      chmod(temporary.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
-      !base::ReplaceFile(temporary, credential_path_, nullptr)) {
-    base::DeleteFile(temporary);
-    return false;
-  }
-  return true;
+  return WritePrivateFileAtomically(credential_path_, backend_->capability());
 }
 
 void PreferenceControlTransport::AcceptLoop(

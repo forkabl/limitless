@@ -45,8 +45,8 @@ class RunningProfileControlRegistry {
     Registration(RunningProfileControlRegistry* registry,
                  Profile* profile,
                  BrowserWindowInterface* browser_window,
-                 base::RepeatingCallback<void(
-                     const EffectivePreferenceValue&)> value_changed);
+                 base::RepeatingCallback<void(const EffectivePreferenceValue&)>
+                     value_changed);
     void OnBrowserDidClose(BrowserWindowInterface* browser_window);
     void Reset();
 
@@ -58,8 +58,7 @@ class RunningProfileControlRegistry {
   };
 
   RunningProfileControlRegistry();
-  RunningProfileControlRegistry(const RunningProfileControlRegistry&) =
-      delete;
+  RunningProfileControlRegistry(const RunningProfileControlRegistry&) = delete;
   RunningProfileControlRegistry& operator=(
       const RunningProfileControlRegistry&) = delete;
   ~RunningProfileControlRegistry();

@@ -12,6 +12,7 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
+#include "limitless_preference_control_transport.h"
 
 namespace limitless {
 
@@ -20,7 +21,10 @@ struct RunningProfileControlRegistry::ProfileEntry {
       : profile(profile),
         backend(profile,
                 base::BindRepeating(&ProfileEntry::NotifyValueChanged,
-                                    base::Unretained(this))) {}
+                                    base::Unretained(this))),
+        transport(&backend, profile->GetPath()) {
+    transport.Start();
+  }
 
   void NotifyValueChanged(const EffectivePreferenceValue& value) {
     value_changed_callbacks.Notify(value);
@@ -28,6 +32,7 @@ struct RunningProfileControlRegistry::ProfileEntry {
 
   const raw_ptr<Profile> profile;
   ProfilePreferenceControlBackend backend;
+  PreferenceControlTransport transport;
   std::vector<raw_ptr<BrowserWindowInterface>> windows;
   base::RepeatingCallbackList<void(const EffectivePreferenceValue&)>
       value_changed_callbacks;
@@ -39,9 +44,7 @@ RunningProfileControlRegistry::Registration::Registration(
     BrowserWindowInterface* browser_window,
     base::RepeatingCallback<void(const EffectivePreferenceValue&)>
         value_changed)
-    : registry_(registry),
-      profile_(profile),
-      browser_window_(browser_window) {
+    : registry_(registry), profile_(profile), browser_window_(browser_window) {
   if (value_changed) {
     value_changed_subscription_ =
         registry_->FindEntry(profile_)->value_changed_callbacks.Add(
