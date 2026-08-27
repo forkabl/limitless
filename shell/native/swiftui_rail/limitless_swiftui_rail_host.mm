@@ -893,6 +893,11 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     return state;
   }
 
+  std::optional<ProductCommandWindowState> GetWindowStateForTesting() const {
+    return command_window_binding_ ? command_window_binding_->GetState()
+                                   : std::nullopt;
+  }
+
   ProductCommandQueryResult QueryProductCommand(
       const ProductCommandInvocation& invocation) const {
     if (!browser_window_ || !tab_list_ || !workspace_controller_ ||
@@ -1864,6 +1869,13 @@ SwiftUITabRailHost* FindHost(BrowserWindowInterface* browser_window) {
 }
 
 }  // namespace
+
+std::optional<ProductCommandWindowState>
+GetSwiftUIProductCommandWindowStateForTesting(
+    BrowserWindowInterface* browser_window) {
+  SwiftUITabRailHost* host = FindHost(browser_window);
+  return host ? host->GetWindowStateForTesting() : std::nullopt;
+}
 
 ProductCommandQueryResult QuerySwiftUIProductCommandForTesting(
     BrowserWindowInterface* browser_window,

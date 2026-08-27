@@ -38,6 +38,7 @@ namespace limitless {
 struct ProductCommandInvocation;
 struct ProductCommandQueryResult;
 struct ProductCommandExecutionResult;
+struct ProductCommandWindowState;
 
 ProductCommandQueryResult QuerySwiftUIProductCommandForTesting(
     BrowserWindowInterface* browser_window,
@@ -45,6 +46,9 @@ ProductCommandQueryResult QuerySwiftUIProductCommandForTesting(
 ProductCommandExecutionResult ExecuteSwiftUIProductCommandForTesting(
     BrowserWindowInterface* browser_window,
     const ProductCommandInvocation& invocation);
+std::optional<ProductCommandWindowState>
+GetSwiftUIProductCommandWindowStateForTesting(
+    BrowserWindowInterface* browser_window);
 
 inline constexpr char kSwiftUIBoundaryProbeSwitch[] =
     "limitless-swiftui-boundary-probe";
