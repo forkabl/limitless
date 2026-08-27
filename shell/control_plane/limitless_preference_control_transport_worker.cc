@@ -99,8 +99,16 @@ PreferenceControlTransportWorker::Prepare() {
   if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) return result;
   memcpy(address.sun_path, inputs_.socket_path.value().c_str(), inputs_.socket_path.value().size() + 1);
   struct stat socket_stat = {};
-  if (lstat(inputs_.socket_path.value().c_str(), &socket_stat) == 0) {
+  struct stat descriptor_stat = {};
+  struct stat credential_stat = {};
+  if (lstat(inputs_.socket_path.value().c_str(), &socket_stat) == 0 ||
+      lstat(inputs_.descriptor_path.value().c_str(), &descriptor_stat) == 0 ||
+      lstat(inputs_.credential_path.value().c_str(), &credential_stat) == 0) {
     result.status = WorkerPrepareStatus::kCollision;
+    return result;
+  }
+  if (errno != ENOENT) {
+    result.status = WorkerPrepareStatus::kSocket;
     return result;
   }
   if (bind(listener_.get(), reinterpret_cast<sockaddr*>(&address),

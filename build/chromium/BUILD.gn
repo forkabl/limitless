@@ -57,6 +57,7 @@ source_set("swiftui_browser_tests") {
   frameworks = [ "AppKit.framework" ]
 
   sources = [
+    "../../tests/control_plane/limitless_preference_control_transport_worker_unittest.cc",
     "../../tests/browser/limitless_control_cli_browsertest.cc",
     "../../tests/browser/limitless_control_plane_browsertest.cc",
     "../../tests/browser/limitless_profile_preference_backend_browsertest.cc",
@@ -73,6 +74,7 @@ source_set("swiftui_browser_tests") {
     "../../shell/commands:command_registry",
     "../../shell/control_plane:preference_control",
     "../../shell/control_plane:preference_control_transport",
+    "../../shell/control_plane:preference_control_transport_worker",
     "../../shell/control_plane:profile_preference_backend",
     "../../shell/control_plane:profile_prefs",
     "../../shell/control_plane:running_profile_control_registry",
