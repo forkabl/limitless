@@ -16,6 +16,17 @@ source_set("preference_control") {
   public_configs = [ ":preference_control_public" ]
 }
 
+source_set("preference_control_protocol") {
+  sources = [
+    "limitless_preference_control_protocol.cc",
+    "limitless_preference_control_protocol.h",
+  ]
+
+  public_deps = [ ":preference_control" ]
+  public_configs = [ ":preference_control_public" ]
+  deps = [ "//base" ]
+}
+
 config("profile_prefs_public") {
   defines = [ "LIMITLESS_PROFILE_PREFS_ENABLED" ]
   include_dirs = [ "." ]
@@ -81,7 +92,11 @@ source_set("preference_control_transport") {
     "//base",
   ]
   public_configs = [ ":preference_control_public" ]
-  deps = [ ":preference_control_transport_worker" ]
+  deps = [
+    ":preference_control",
+    ":preference_control_protocol",
+    ":preference_control_transport_worker",
+  ]
 }
 
 source_set("preference_control_transport_worker") {
@@ -91,4 +106,8 @@ source_set("preference_control_transport_worker") {
   ]
   public_deps = [ "//base" ]
   public_configs = [ ":preference_control_public" ]
+  deps = [
+    ":preference_control",
+    ":preference_control_protocol",
+  ]
 }

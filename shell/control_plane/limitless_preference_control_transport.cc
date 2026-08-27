@@ -31,6 +31,8 @@
 #include "base/process/process_handle.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
+#include "limitless_preference_control_protocol.h"
+#include "limitless_preference_control_service.h"
 
 namespace limitless {
 namespace {
@@ -83,6 +85,9 @@ bool WriteExactly(int fd,
     }
     const ssize_t write_size =
         send(fd, input.data(), input.size(), MSG_NOSIGNAL);
+    if (write_size == 0) {
+      return false;
+    }
     if (write_size < 0) {
       if (errno == EINTR) {
         continue;
@@ -150,16 +155,6 @@ bool ConfigureCloseOnExecBlocking(int descriptor) {
   return descriptor_flags >= 0 && status_flags >= 0 &&
          fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0 &&
          fcntl(descriptor, F_SETFL, status_flags & ~O_NONBLOCK) == 0;
-}
-
-std::string SerializeParseError(PreferenceRequestParseStatus status) {
-  base::DictValue result;
-  result.Set("version", kPreferenceControlSchemaVersion);
-  result.Set("status", "invalid_request");
-  result.Set("error", PreferenceRequestParseStatusToString(status));
-  std::string serialized;
-  CHECK(base::JSONWriter::Write(result, &serialized));
-  return serialized;
 }
 
 bool SendFramedResponse(int fd,
@@ -417,10 +412,10 @@ void PreferenceControlTransport::AcceptLoop(
     }
     const size_t payload_size = ntohl(network_size);
     if (payload_size == 0 || payload_size > kMaximumPreferenceRequestBytes) {
-      SendFramedResponse(
-          connection.get(),
-          SerializeParseError(PreferenceRequestParseStatus::kOversized),
-          deadline);
+      SendFramedResponse(connection.get(),
+                         SerializePreferenceRequestParseError(
+                             PreferenceRequestParseStatus::kOversized),
+                         deadline);
       continue;
     }
     std::string payload(payload_size, '\0');
@@ -474,7 +469,7 @@ void PreferenceControlTransport::HandleRequestOnOrigin(
   std::string response;
   PreferenceRequestParseResult parsed = ParsePreferenceRequest(payload);
   if (!parsed.succeeded()) {
-    response = SerializeParseError(parsed.status);
+    response = SerializePreferenceRequestParseError(parsed.status);
   } else {
     PreferenceControlService service(backend_);
     response =

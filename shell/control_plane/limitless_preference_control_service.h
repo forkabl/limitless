@@ -5,6 +5,7 @@
 #ifndef LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_SERVICE_H_
 #define LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_SERVICE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>

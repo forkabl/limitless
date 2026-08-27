@@ -37,6 +37,7 @@
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
+#include "shell/control_plane/limitless_preference_control_protocol.h"
 #include "shell/control_plane/limitless_preference_control_transport.h"
 #include "shell/control_plane/limitless_profile_prefs.h"
 #include "shell/control_plane/limitless_running_profile_control_registry.h"

@@ -1,25 +1,478 @@
 #include "shell/control_plane/limitless_preference_control_transport_worker.h"
 
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#include <atomic>
+#include <cerrno>
+#include <cstring>
+#include <string>
+#include <string_view>
 
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_reader.h"
 #include "base/process/process_handle.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/thread_pool.h"
+#include "base/test/scoped_run_loop_timeout.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
+#include "base/threading/platform_thread.h"
+#include "base/threading/thread.h"
 #include "base/threading/thread_restrictions.h"
+#include "shell/control_plane/limitless_preference_control_protocol.h"
+#include "shell/control_plane/limitless_preference_control_service.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace limitless {
 namespace {
+
+constexpr base::TimeDelta kRunTestTimeout = base::Seconds(10);
+constexpr base::TimeDelta kClientIoTimeout = base::Seconds(5);
+
+enum class ReadResult {
+  kComplete,
+  kEof,
+  kError,
+};
+
+struct ClientResult {
+  bool connected = false;
+  bool request_sent = false;
+  bool response_received = false;
+  bool eof = false;
+  std::string response;
+};
+
+struct SlowDripResult {
+  bool connected = false;
+  bool header_sent = false;
+  bool eof = false;
+  size_t payload_bytes_sent = 0;
+  base::TimeDelta elapsed;
+};
+
+bool ConfigureClientTimeouts(int fd) {
+  const int64_t microseconds = kClientIoTimeout.InMicroseconds();
+  const timeval timeout = {
+      .tv_sec = static_cast<time_t>(microseconds / 1000000),
+      .tv_usec = static_cast<suseconds_t>(microseconds % 1000000),
+  };
+  return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
+             0 &&
+         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+             0;
+}
+
+base::ScopedFD ConnectOnce(const base::FilePath& socket_path) {
+  base::ScopedFD connection(socket(AF_UNIX, SOCK_STREAM, 0));
+  if (!connection.is_valid() || !ConfigureClientTimeouts(connection.get())) {
+    return {};
+  }
+  sockaddr_un address = {};
+  address.sun_family = AF_UNIX;
+  if (socket_path.value().size() >= sizeof(address.sun_path)) {
+    return {};
+  }
+  memcpy(address.sun_path, socket_path.value().c_str(),
+         socket_path.value().size() + 1);
+  const socklen_t address_length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + socket_path.value().size() + 1);
+  if (connect(connection.get(), reinterpret_cast<sockaddr*>(&address),
+              address_length) != 0) {
+    return {};
+  }
+  return connection;
+}
+
+bool WriteExactlyForClient(int fd, std::string_view bytes) {
+  while (!bytes.empty()) {
+    const ssize_t written = send(fd, bytes.data(), bytes.size(), MSG_NOSIGNAL);
+    if (written > 0) {
+      bytes.remove_prefix(static_cast<size_t>(written));
+      continue;
+    }
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool WriteFrameForClient(int fd, std::string_view payload) {
+  const uint32_t network_size = htonl(static_cast<uint32_t>(payload.size()));
+  return WriteExactlyForClient(
+             fd, std::string_view(reinterpret_cast<const char*>(&network_size),
+                                  sizeof(network_size))) &&
+         WriteExactlyForClient(fd, payload);
+}
+
+ReadResult ReadExactlyForClient(int fd, char* output, size_t size) {
+  while (size > 0) {
+    const ssize_t read_size = read(fd, output, size);
+    if (read_size > 0) {
+      output += read_size;
+      size -= static_cast<size_t>(read_size);
+      continue;
+    }
+    if (read_size == 0) {
+      return ReadResult::kEof;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    return ReadResult::kError;
+  }
+  return ReadResult::kComplete;
+}
+
+void ReadFramedResponse(int fd, ClientResult* result) {
+  uint32_t network_size = 0;
+  const ReadResult header_result = ReadExactlyForClient(
+      fd, reinterpret_cast<char*>(&network_size), sizeof(network_size));
+  if (header_result != ReadResult::kComplete) {
+    result->eof = header_result == ReadResult::kEof;
+    return;
+  }
+  const size_t response_size = ntohl(network_size);
+  if (response_size > kMaximumPreferenceTransportResponseBytes) {
+    return;
+  }
+  result->response.resize(response_size);
+  const ReadResult payload_result = ReadExactlyForClient(
+      fd, result->response.data(), result->response.size());
+  result->response_received = payload_result == ReadResult::kComplete;
+  result->eof = payload_result == ReadResult::kEof;
+}
+
+ClientResult ExchangeFrame(const base::FilePath& socket_path,
+                           std::string payload) {
+  ClientResult result;
+  base::ScopedFD connection = ConnectOnce(socket_path);
+  result.connected = connection.is_valid();
+  if (!connection.is_valid()) {
+    return result;
+  }
+  result.request_sent = WriteFrameForClient(connection.get(), payload);
+  if (result.request_sent) {
+    ReadFramedResponse(connection.get(), &result);
+  }
+  return result;
+}
+
+ClientResult SendOversizedHeader(const base::FilePath& socket_path) {
+  ClientResult result;
+  base::ScopedFD connection = ConnectOnce(socket_path);
+  result.connected = connection.is_valid();
+  if (!connection.is_valid()) {
+    return result;
+  }
+  const uint32_t network_size =
+      htonl(static_cast<uint32_t>(kMaximumPreferenceRequestBytes + 1));
+  result.request_sent = WriteExactlyForClient(
+      connection.get(),
+      std::string_view(reinterpret_cast<const char*>(&network_size),
+                       sizeof(network_size)));
+  if (result.request_sent) {
+    ReadFramedResponse(connection.get(), &result);
+  }
+  return result;
+}
+
+ClientResult SendTruncatedBody(const base::FilePath& socket_path,
+                               bool await_cancellation) {
+  ClientResult result;
+  base::ScopedFD connection = ConnectOnce(socket_path);
+  result.connected = connection.is_valid();
+  if (!connection.is_valid()) {
+    return result;
+  }
+  const uint32_t network_size = htonl(8u);
+  result.request_sent =
+      WriteExactlyForClient(
+          connection.get(),
+          std::string_view(reinterpret_cast<const char*>(&network_size),
+                           sizeof(network_size))) &&
+      WriteExactlyForClient(connection.get(), "ab");
+  if (!result.request_sent) {
+    return result;
+  }
+  if (!await_cancellation) {
+    shutdown(connection.get(), SHUT_WR);
+  }
+  char byte = 0;
+  const ReadResult read_result =
+      ReadExactlyForClient(connection.get(), &byte, sizeof(byte));
+  result.eof = read_result == ReadResult::kEof;
+  return result;
+}
+
+ClientResult ConnectAndAwaitEof(const base::FilePath& socket_path) {
+  ClientResult result;
+  base::ScopedFD connection = ConnectOnce(socket_path);
+  result.connected = connection.is_valid();
+  if (!connection.is_valid()) {
+    return result;
+  }
+  char byte = 0;
+  result.eof = ReadExactlyForClient(connection.get(), &byte, sizeof(byte)) ==
+               ReadResult::kEof;
+  return result;
+}
+
+SlowDripResult DripPayloadPastDeadline(const base::FilePath& socket_path) {
+  constexpr size_t kPayloadSize = 12;
+  constexpr base::TimeDelta kDripInterval = base::Milliseconds(100);
+  SlowDripResult result;
+  base::ScopedFD connection = ConnectOnce(socket_path);
+  result.connected = connection.is_valid();
+  if (!connection.is_valid()) {
+    return result;
+  }
+  const uint32_t network_size = htonl(static_cast<uint32_t>(kPayloadSize));
+  result.header_sent = WriteExactlyForClient(
+      connection.get(),
+      std::string_view(reinterpret_cast<const char*>(&network_size),
+                       sizeof(network_size)));
+  if (!result.header_sent) {
+    return result;
+  }
+
+  const base::TimeTicks started = base::TimeTicks::Now();
+  for (size_t i = 0; i < kPayloadSize; ++i) {
+    const char byte = 'x';
+    ssize_t written;
+    do {
+      written = send(connection.get(), &byte, sizeof(byte), MSG_NOSIGNAL);
+    } while (written < 0 && errno == EINTR);
+    if (written != 1) {
+      break;
+    }
+    ++result.payload_bytes_sent;
+    base::PlatformThread::Sleep(kDripInterval);
+    char response_byte = 0;
+    const ssize_t observed = recv(connection.get(), &response_byte,
+                                  sizeof(response_byte), MSG_DONTWAIT);
+    if (observed == 0) {
+      result.eof = true;
+      break;
+    }
+    if (observed < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+        errno != EINTR) {
+      break;
+    }
+  }
+  result.elapsed = base::TimeTicks::Now() - started;
+  if (!result.eof) {
+    char response_byte = 0;
+    result.eof =
+        ReadExactlyForClient(connection.get(), &response_byte,
+                             sizeof(response_byte)) == ReadResult::kEof;
+  }
+  return result;
+}
+
+void SignalEvent(base::WaitableEvent* event) {
+  event->Signal();
+}
+
+void SignalAcceptedEvent(base::WaitableEvent* event, int fd) {
+  event->Signal();
+}
+
+struct AcceptedFdEvidence {
+  void Inspect(int fd) {
+    const int descriptor_flags = fcntl(fd, F_GETFD);
+    const int status_flags = fcntl(fd, F_GETFL);
+    close_on_exec.store(
+        descriptor_flags >= 0 && (descriptor_flags & FD_CLOEXEC) != 0,
+        std::memory_order_release);
+    blocking.store(status_flags >= 0 && (status_flags & O_NONBLOCK) == 0,
+                   std::memory_order_release);
+    inspected.Signal();
+  }
+
+  std::atomic<bool> close_on_exec{false};
+  std::atomic<bool> blocking{false};
+  base::WaitableEvent inspected;
+};
+
+class RejectingSequencedTaskRunner : public base::SequencedTaskRunner {
+ public:
+  bool PostDelayedTask(const base::Location& from_here,
+                       base::OnceClosure task,
+                       base::TimeDelta delay) override {
+    post_attempt_count.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  bool PostNonNestableDelayedTask(const base::Location& from_here,
+                                  base::OnceClosure task,
+                                  base::TimeDelta delay) override {
+    return false;
+  }
+
+  bool RunsTasksInCurrentSequence() const override { return false; }
+
+  std::atomic<int> post_attempt_count{0};
+
+ private:
+  ~RejectingSequencedTaskRunner() override = default;
+};
+
+class ProtocolBackend : public PreferenceControlBackend {
+ public:
+  std::string_view profile_identifier() const override {
+    return "11111111-1111-4111-8111-111111111111";
+  }
+
+  std::string_view profile_instance_identifier() const override {
+    return "22222222-2222-4222-8222-222222222222";
+  }
+
+  bool is_off_the_record() const override { return false; }
+
+  bool Authenticate(std::string_view capability) const override {
+    return capability == "correct-capability";
+  }
+
+  bool IsManaged(PreferenceKey key) const override { return false; }
+
+  EffectivePreferenceValue GetEffectiveValue(PreferenceKey key) const override {
+    return {.value = {.rail_density = RailDensity::kCompact},
+            .source = PreferenceValueSource::kDefault};
+  }
+
+  bool SetUserValue(PreferenceKey key, const PreferenceValue& value) override {
+    mutation_count.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  uint64_t AppendAuditRecord(const PreferenceAuditRecord& record) override {
+    audit_count.fetch_add(1, std::memory_order_relaxed);
+    if (record.status == PreferenceControlStatus::kSuccess) {
+      successful_audit_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    last_audit_status.store(record.status, std::memory_order_relaxed);
+    return 17;
+  }
+
+  std::atomic<int> mutation_count{0};
+  std::atomic<int> audit_count{0};
+  std::atomic<int> successful_audit_count{0};
+  std::atomic<PreferenceControlStatus> last_audit_status{
+      PreferenceControlStatus::kWriteFailed};
+};
+
+PreferenceControlTransportWorker::Inputs Inputs(const base::FilePath& p);
+
+class PreferenceControlTransportWorkerRunTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    ASSERT_TRUE(temp_directory_.CreateUniqueTempDir());
+    ASSERT_TRUE(worker_thread_.Start());
+    ASSERT_TRUE(origin_thread_.Start());
+  }
+
+  void TearDown() override {
+    cancellation_->Cancel();
+    if (run_started_ && !run_complete_.IsReady()) {
+      EXPECT_TRUE(run_complete_.Wait());
+    }
+    origin_thread_.Stop();
+    worker_thread_.Stop();
+  }
+
+  PreferenceControlTransportWorker::Inputs NewInputs() {
+    return Inputs(temp_directory_.GetPath());
+  }
+
+  void StartWorker(
+      PreferenceControlTransportWorker::Inputs inputs,
+      PreferenceControlTransportWorker::OriginRequestHandler handler,
+      scoped_refptr<base::SequencedTaskRunner> origin_task_runner = nullptr) {
+    ASSERT_FALSE(run_started_);
+    run_started_ = true;
+    if (!origin_task_runner) {
+      origin_task_runner = origin_thread_.task_runner();
+    }
+    auto prepare_callback = prepare_result_.GetSequenceBoundCallback();
+    auto run_complete_callback = run_complete_.GetSequenceBoundCallback();
+    ASSERT_TRUE(worker_thread_.task_runner()->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            [](PreferenceControlTransportWorker::Inputs worker_inputs,
+               scoped_refptr<TransportCancellationState> cancellation,
+               scoped_refptr<base::SequencedTaskRunner> origin_task_runner,
+               PreferenceControlTransportWorker::OriginRequestHandler
+                   request_handler,
+               base::OnceCallback<void(
+                   PreferenceControlTransportWorker::PrepareResult)> prepared,
+               base::OnceClosure run_complete) {
+              PreferenceControlTransportWorker worker(std::move(worker_inputs),
+                                                      std::move(cancellation));
+              auto result = worker.Prepare();
+              const bool prepared_successfully = result.succeeded;
+              std::move(prepared).Run(std::move(result));
+              if (prepared_successfully) {
+                worker.Run(std::move(origin_task_runner),
+                           std::move(request_handler));
+              }
+              worker.Cleanup();
+              std::move(run_complete).Run();
+            },
+            std::move(inputs), cancellation_, std::move(origin_task_runner),
+            std::move(handler), std::move(prepare_callback),
+            std::move(run_complete_callback))));
+    ASSERT_TRUE(prepare_result_.Wait());
+    ASSERT_TRUE(prepare_result_.Get().succeeded);
+  }
+
+  void CancelAndWaitForRun() {
+    cancellation_->Cancel();
+    ASSERT_TRUE(run_complete_.Wait());
+  }
+
+  template <typename Result, typename Function, typename... Arguments>
+  Result RunClient(Function function, Arguments... arguments) {
+    base::test::TestFuture<Result> result;
+    base::ThreadPool::PostTaskAndReplyWithResult(
+        FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+        base::BindOnce(function, std::move(arguments)...),
+        result.GetCallback());
+    EXPECT_TRUE(result.Wait());
+    return result.Take();
+  }
+
+  bool TimedWait(base::WaitableEvent* event) {
+    base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync;
+    return event->TimedWait(kRunTestTimeout);
+  }
+
+  base::test::TaskEnvironment task_environment_;
+  base::test::ScopedRunLoopTimeout run_loop_timeout_{FROM_HERE,
+                                                     kRunTestTimeout};
+  base::ScopedTempDir temp_directory_;
+  base::Thread worker_thread_{"limitless-worker-run-test"};
+  base::Thread origin_thread_{"limitless-worker-origin-test"};
+  scoped_refptr<TransportCancellationState> cancellation_ =
+      base::MakeRefCounted<TransportCancellationState>();
+  base::test::TestFuture<PreferenceControlTransportWorker::PrepareResult>
+      prepare_result_;
+  base::test::TestFuture<void> run_complete_;
+  bool run_started_ = false;
+};
+
 void CancelState(scoped_refptr<TransportCancellationState> state) {
   state->Cancel();
 }
@@ -707,6 +1160,383 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   EXPECT_FALSE(wait_result.Take());
   EXPECT_FALSE(pending->TryBeginHandling());
   EXPECT_FALSE(pending->Complete("late"));
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       SameUidFramedRequestRoundTripsThroughOriginSequence) {
+  constexpr std::string_view kRequest = "request-body";
+  constexpr std::string_view kResponse = "response-body";
+  base::test::TestFuture<bool, bool> handler_result;
+  auto handler_callback = handler_result.GetSequenceBoundRepeatingCallback();
+  auto origin_task_runner = origin_thread_.task_runner();
+  StartWorker(NewInputs(),
+              base::BindRepeating(
+                  [](scoped_refptr<base::SequencedTaskRunner> expected_origin,
+                     base::RepeatingCallback<void(bool, bool)> report,
+                     std::string payload, base::TimeTicks deadline,
+                     scoped_refptr<PendingRequest> pending) {
+                    const bool on_origin =
+                        expected_origin->RunsTasksInCurrentSequence();
+                    const bool completed =
+                        payload == "request-body" &&
+                        pending->Complete(std::string("response-body"));
+                    report.Run(on_origin, completed);
+                  },
+                  std::move(origin_task_runner), std::move(handler_callback)));
+
+  const ClientResult client = RunClient<ClientResult>(
+      &ExchangeFrame, prepare_result_.Get().socket_path, std::string(kRequest));
+  ASSERT_TRUE(handler_result.Wait());
+  EXPECT_TRUE(handler_result.Get<0>());
+  EXPECT_TRUE(handler_result.Get<1>());
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.request_sent);
+  EXPECT_TRUE(client.response_received);
+  EXPECT_EQ(client.response, kResponse);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       OversizedHeaderReturnsExactErrorWithoutOriginDispatch) {
+  std::atomic<int> dispatch_count{0};
+  StartWorker(NewInputs(), base::BindRepeating(
+                               [](std::atomic<int>* count, std::string payload,
+                                  base::TimeTicks deadline,
+                                  scoped_refptr<PendingRequest> pending) {
+                                 count->fetch_add(1, std::memory_order_relaxed);
+                               },
+                               &dispatch_count));
+
+  const ClientResult client = RunClient<ClientResult>(
+      &SendOversizedHeader, prepare_result_.Get().socket_path);
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.request_sent);
+  ASSERT_TRUE(client.response_received);
+  EXPECT_EQ(client.response, SerializePreferenceRequestParseError(
+                                 PreferenceRequestParseStatus::kOversized));
+  EXPECT_EQ(dispatch_count.load(std::memory_order_relaxed), 0);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       TruncatedBodyClosesConnectionWithoutOriginDispatch) {
+  std::atomic<int> dispatch_count{0};
+  StartWorker(NewInputs(), base::BindRepeating(
+                               [](std::atomic<int>* count, std::string payload,
+                                  base::TimeTicks deadline,
+                                  scoped_refptr<PendingRequest> pending) {
+                                 count->fetch_add(1, std::memory_order_relaxed);
+                               },
+                               &dispatch_count));
+
+  const ClientResult client = RunClient<ClientResult>(
+      &SendTruncatedBody, prepare_result_.Get().socket_path, false);
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.request_sent);
+  EXPECT_TRUE(client.eof);
+  EXPECT_EQ(dispatch_count.load(std::memory_order_relaxed), 0);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       SlowDripCannotExtendAbsoluteInputDeadline) {
+  constexpr size_t kCompletePayloadSize = 12;
+  std::atomic<int> dispatch_count{0};
+  auto inputs = NewInputs();
+  inputs.io_timeout_for_testing = base::Milliseconds(200);
+  StartWorker(
+      std::move(inputs),
+      base::BindRepeating(
+          [](std::atomic<int>* count, std::string payload,
+             base::TimeTicks deadline, scoped_refptr<PendingRequest> pending) {
+            count->fetch_add(1, std::memory_order_relaxed);
+          },
+          &dispatch_count));
+
+  const SlowDripResult client = RunClient<SlowDripResult>(
+      &DripPayloadPastDeadline, prepare_result_.Get().socket_path);
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.header_sent);
+  EXPECT_TRUE(client.eof);
+  EXPECT_LT(client.payload_bytes_sent, kCompletePayloadSize);
+  EXPECT_LT(client.elapsed, base::Milliseconds(900));
+  EXPECT_EQ(dispatch_count.load(std::memory_order_relaxed), 0);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       CancellationWakesIdlePollAndRemovesOwnedArtifacts) {
+  base::WaitableEvent entering_accept_wait;
+  auto inputs = NewInputs();
+  const base::FilePath socket_path = inputs.socket_path;
+  const base::FilePath credential_path = inputs.credential_path;
+  const base::FilePath descriptor_path = inputs.descriptor_path;
+  inputs.entering_accept_wait_for_testing =
+      base::BindRepeating(&SignalEvent, &entering_accept_wait);
+  StartWorker(std::move(inputs), base::DoNothing());
+  ASSERT_TRUE(TimedWait(&entering_accept_wait));
+
+  const base::TimeTicks cancel_started = base::TimeTicks::Now();
+  CancelAndWaitForRun();
+  EXPECT_LT(base::TimeTicks::Now() - cancel_started, base::Seconds(3));
+  EXPECT_FALSE(base::PathExists(socket_path));
+  EXPECT_FALSE(base::PathExists(credential_path));
+  EXPECT_FALSE(base::PathExists(descriptor_path));
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       CancellationShutsDownAcceptedPartialFrame) {
+  base::WaitableEvent accepted;
+  auto inputs = NewInputs();
+  inputs.accepted_fd_for_testing =
+      base::BindRepeating(&SignalAcceptedEvent, &accepted);
+  StartWorker(std::move(inputs), base::DoNothing());
+
+  base::test::TestFuture<ClientResult> client_result;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+      base::BindOnce(&SendTruncatedBody, prepare_result_.Get().socket_path,
+                     true),
+      client_result.GetCallback());
+  ASSERT_TRUE(TimedWait(&accepted));
+  cancellation_->Cancel();
+  ASSERT_TRUE(client_result.Wait());
+  const ClientResult client = client_result.Take();
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.request_sent);
+  EXPECT_TRUE(client.eof);
+  ASSERT_TRUE(run_complete_.Wait());
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       AcceptedDescriptorIsBlockingAndCloseOnExec) {
+  AcceptedFdEvidence evidence;
+  auto inputs = NewInputs();
+  inputs.accepted_fd_for_testing = base::BindRepeating(
+      &AcceptedFdEvidence::Inspect, base::Unretained(&evidence));
+  StartWorker(std::move(inputs), base::DoNothing());
+
+  base::test::TestFuture<ClientResult> client_result;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+      base::BindOnce(&ConnectAndAwaitEof, prepare_result_.Get().socket_path),
+      client_result.GetCallback());
+  ASSERT_TRUE(TimedWait(&evidence.inspected));
+  EXPECT_TRUE(evidence.close_on_exec.load(std::memory_order_acquire));
+  EXPECT_TRUE(evidence.blocking.load(std::memory_order_acquire));
+  cancellation_->Cancel();
+  ASSERT_TRUE(client_result.Wait());
+  EXPECT_TRUE(client_result.Get().connected);
+  EXPECT_TRUE(client_result.Get().eof);
+  ASSERT_TRUE(run_complete_.Wait());
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       QueuedOriginHandlerCannotClaimAfterAbsoluteDeadline) {
+  base::WaitableEvent origin_blocked;
+  base::WaitableEvent release_origin;
+  ASSERT_TRUE(origin_thread_.task_runner()->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          [](base::WaitableEvent* entered, base::WaitableEvent* release) {
+            base::ScopedAllowBaseSyncPrimitivesForTesting allow_sync;
+            entered->Signal();
+            EXPECT_TRUE(release->TimedWait(kRunTestTimeout));
+          },
+          &origin_blocked, &release_origin)));
+  ASSERT_TRUE(TimedWait(&origin_blocked));
+  base::ScopedClosureRunner release_guard(
+      base::BindOnce(&SignalEvent, &release_origin));
+
+  std::atomic<int> dispatch_count{0};
+  std::atomic<int> mutation_count{0};
+  auto inputs = NewInputs();
+  inputs.io_timeout_for_testing = base::Milliseconds(150);
+  StartWorker(std::move(inputs),
+              base::BindRepeating(
+                  [](std::atomic<int>* dispatches, std::atomic<int>* mutations,
+                     std::string payload, base::TimeTicks deadline,
+                     scoped_refptr<PendingRequest> pending) {
+                    dispatches->fetch_add(1, std::memory_order_relaxed);
+                    mutations->fetch_add(1, std::memory_order_relaxed);
+                    pending->Complete("too-late");
+                  },
+                  &dispatch_count, &mutation_count));
+
+  const ClientResult client = RunClient<ClientResult>(
+      &ExchangeFrame, prepare_result_.Get().socket_path, std::string("queued"));
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.request_sent);
+  EXPECT_FALSE(client.response_received);
+  EXPECT_TRUE(client.eof);
+  release_guard.RunAndReset();
+  base::test::TestFuture<void> origin_drained;
+  ASSERT_TRUE(origin_thread_.task_runner()->PostTask(
+      FROM_HERE, origin_drained.GetSequenceBoundCallback()));
+  ASSERT_TRUE(origin_drained.Wait());
+  EXPECT_EQ(dispatch_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(mutation_count.load(std::memory_order_relaxed), 0);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       WrongCapabilityReturnsUnauthenticatedWithoutMutation) {
+  constexpr std::string_view kRequest =
+      R"json({"version":1,"request_id":"33333333-3333-4333-8333-333333333333","operation":"write","target":{"profile_id":"11111111-1111-4111-8111-111111111111","instance_id":"22222222-2222-4222-8222-222222222222"},"actor":{"type":"agent","id":"worker-run-test"},"authentication":{"scheme":"capability","credential":"wrong-capability"},"key":"rail_density","value":"comfortable"})json";
+  ProtocolBackend backend;
+  base::test::TestFuture<bool, bool> handler_result;
+  auto handler_callback = handler_result.GetSequenceBoundRepeatingCallback();
+  StartWorker(
+      NewInputs(),
+      base::BindRepeating(
+          [](ProtocolBackend* backend,
+             base::RepeatingCallback<void(bool, bool)> report,
+             std::string payload, base::TimeTicks deadline,
+             scoped_refptr<PendingRequest> pending) {
+            PreferenceRequestParseResult parsed =
+                ParsePreferenceRequest(payload);
+            if (!parsed.succeeded()) {
+              report.Run(false,
+                         pending->Complete(SerializePreferenceRequestParseError(
+                             parsed.status)));
+              return;
+            }
+            PreferenceControlService service(backend);
+            const bool completed =
+                pending->Complete(SerializePreferenceControlResult(
+                    service.Execute(*parsed.request)));
+            report.Run(true, completed);
+          },
+          &backend, std::move(handler_callback)));
+
+  const ClientResult client = RunClient<ClientResult>(
+      &ExchangeFrame, prepare_result_.Get().socket_path, std::string(kRequest));
+  ASSERT_TRUE(handler_result.Wait());
+  EXPECT_TRUE(handler_result.Get<0>());
+  EXPECT_TRUE(handler_result.Get<1>());
+  ASSERT_TRUE(client.response_received);
+  std::optional<base::Value> response =
+      base::JSONReader::Read(client.response, base::JSON_PARSE_RFC);
+  ASSERT_TRUE(response.has_value());
+  const base::DictValue* response_dict = response->GetIfDict();
+  ASSERT_TRUE(response_dict);
+  ASSERT_TRUE(response_dict->FindString("status"));
+  EXPECT_EQ(*response_dict->FindString("status"), "unauthenticated");
+  ASSERT_TRUE(response_dict->FindString("request_id"));
+  EXPECT_EQ(*response_dict->FindString("request_id"),
+            "33333333-3333-4333-8333-333333333333");
+  EXPECT_EQ(backend.mutation_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(backend.audit_count.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(backend.successful_audit_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(backend.last_audit_status.load(std::memory_order_relaxed),
+            PreferenceControlStatus::kUnauthenticated);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       CancellationReleasesClaimedPendingAndRejectsLateCompletion) {
+  base::test::TestFuture<scoped_refptr<PendingRequest>> handler_result;
+  auto handler_callback = handler_result.GetSequenceBoundRepeatingCallback();
+  StartWorker(
+      NewInputs(),
+      base::BindRepeating(
+          [](base::RepeatingCallback<void(scoped_refptr<PendingRequest>)>
+                 report,
+             std::string payload, base::TimeTicks deadline,
+             scoped_refptr<PendingRequest> pending) { report.Run(pending); },
+          std::move(handler_callback)));
+
+  base::test::TestFuture<ClientResult> client_result;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+      base::BindOnce(&ExchangeFrame, prepare_result_.Get().socket_path,
+                     std::string("claim-and-wait")),
+      client_result.GetCallback());
+  ASSERT_TRUE(handler_result.Wait());
+  scoped_refptr<PendingRequest> pending = handler_result.Get<0>();
+  cancellation_->Cancel();
+  ASSERT_TRUE(client_result.Wait());
+  EXPECT_TRUE(client_result.Get().connected);
+  EXPECT_TRUE(client_result.Get().request_sent);
+  EXPECT_TRUE(client_result.Get().eof);
+  EXPECT_FALSE(pending->Complete("late"));
+  ASSERT_TRUE(run_complete_.Wait());
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       OversizedHandlerResponseIsDropped) {
+  base::test::TestFuture<bool> handler_result;
+  auto handler_callback = handler_result.GetSequenceBoundRepeatingCallback();
+  StartWorker(
+      NewInputs(),
+      base::BindRepeating(
+          [](base::RepeatingCallback<void(bool)> report, std::string payload,
+             base::TimeTicks deadline, scoped_refptr<PendingRequest> pending) {
+            const bool completed = pending->Complete(
+                std::string(kMaximumPreferenceTransportResponseBytes + 1, 'x'));
+            report.Run(completed);
+          },
+          std::move(handler_callback)));
+
+  const ClientResult client =
+      RunClient<ClientResult>(&ExchangeFrame, prepare_result_.Get().socket_path,
+                              std::string("large-response"));
+  ASSERT_TRUE(handler_result.Wait());
+  EXPECT_TRUE(handler_result.Get<0>());
+  EXPECT_TRUE(client.connected);
+  EXPECT_TRUE(client.request_sent);
+  EXPECT_FALSE(client.response_received);
+  EXPECT_TRUE(client.eof);
+  CancelAndWaitForRun();
+}
+
+TEST_F(PreferenceControlTransportWorkerRunTest,
+       RejectedOriginPostsDropEachRequestAndRemainCancellable) {
+  std::atomic<int> dispatch_count{0};
+  auto rejecting_origin = base::MakeRefCounted<RejectingSequencedTaskRunner>();
+  auto inputs = NewInputs();
+  inputs.io_timeout_for_testing = base::Seconds(4);
+  const base::FilePath socket_path = inputs.socket_path;
+  const base::FilePath credential_path = inputs.credential_path;
+  const base::FilePath descriptor_path = inputs.descriptor_path;
+  StartWorker(
+      std::move(inputs),
+      base::BindRepeating(
+          [](std::atomic<int>* count, std::string payload,
+             base::TimeTicks deadline, scoped_refptr<PendingRequest> pending) {
+            count->fetch_add(1, std::memory_order_relaxed);
+            pending->Complete("unexpected");
+          },
+          &dispatch_count),
+      rejecting_origin);
+
+  const base::TimeTicks first_started = base::TimeTicks::Now();
+  const ClientResult first = RunClient<ClientResult>(
+      &ExchangeFrame, socket_path, std::string("first-complete-request"));
+  const base::TimeDelta first_elapsed = base::TimeTicks::Now() - first_started;
+  const base::TimeTicks second_started = base::TimeTicks::Now();
+  const ClientResult second = RunClient<ClientResult>(
+      &ExchangeFrame, socket_path, std::string("second-complete-request"));
+  const base::TimeDelta second_elapsed =
+      base::TimeTicks::Now() - second_started;
+  EXPECT_TRUE(first.connected);
+  EXPECT_TRUE(first.request_sent);
+  EXPECT_TRUE(first.eof);
+  EXPECT_FALSE(first.response_received);
+  EXPECT_TRUE(second.connected);
+  EXPECT_TRUE(second.request_sent);
+  EXPECT_TRUE(second.eof);
+  EXPECT_FALSE(second.response_received);
+  EXPECT_EQ(dispatch_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(
+      rejecting_origin->post_attempt_count.load(std::memory_order_relaxed), 2);
+  EXPECT_LT(first_elapsed, base::Seconds(2));
+  EXPECT_LT(second_elapsed, base::Seconds(2));
+
+  CancelAndWaitForRun();
+  EXPECT_FALSE(base::PathExists(socket_path));
+  EXPECT_FALSE(base::PathExists(credential_path));
+  EXPECT_FALSE(base::PathExists(descriptor_path));
 }
 
 }  // namespace

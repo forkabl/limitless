@@ -6,7 +6,6 @@
 #define LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_TRANSPORT_H_
 
 #include <atomic>
-#include <cstddef>
 #include <memory>
 #include <mutex>
 
@@ -20,7 +19,6 @@
 
 namespace limitless {
 
-inline constexpr size_t kMaximumPreferenceTransportResponseBytes = 32 * 1024;
 inline constexpr char kPreferenceControlRuntimeDirectory[] = "LimitlessControl";
 
 enum class PreferenceControlTransportStartStatus {

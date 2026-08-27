@@ -1,12 +1,16 @@
 #include "limitless_preference_control_transport_worker.h"
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/stdio.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -15,10 +19,99 @@
 #include <string_view>
 
 #include "base/check.h"
+#include "base/containers/span.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "limitless_preference_control_protocol.h"
+#include "limitless_preference_control_service.h"
 
 namespace {
+
+constexpr base::TimeDelta kTransportIoTimeout = base::Seconds(2);
+
+bool ConfigureDeadline(int fd, base::TimeTicks deadline) {
+  base::TimeDelta remaining = deadline - base::TimeTicks::Now();
+  if (!remaining.is_positive()) {
+    return false;
+  }
+  timeval timeout = {};
+  const int64_t micros = std::max<int64_t>(1, remaining.InMicroseconds());
+  timeout.tv_sec = micros / 1000000;
+  timeout.tv_usec = micros % 1000000;
+  return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
+             0 &&
+         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+             0;
+}
+
+bool ReadExactly(int fd, base::span<uint8_t> output, base::TimeTicks deadline) {
+  while (!output.empty()) {
+    if (!ConfigureDeadline(fd, deadline)) {
+      return false;
+    }
+    ssize_t n = read(fd, output.data(), output.size());
+    if (n == 0) {
+      return false;
+    }
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    output = output.subspan(static_cast<size_t>(n));
+  }
+  return true;
+}
+
+bool WriteExactly(int fd,
+                  base::span<const uint8_t> input,
+                  base::TimeTicks deadline) {
+  while (!input.empty()) {
+    if (!ConfigureDeadline(fd, deadline)) {
+      return false;
+    }
+    ssize_t n = send(fd, input.data(), input.size(), MSG_NOSIGNAL);
+    if (n <= 0) {
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    input = input.subspan(static_cast<size_t>(n));
+  }
+  return true;
+}
+
+bool IsCurrentUserPeer(int fd) {
+  uid_t uid = 0;
+  gid_t gid = 0;
+  return getpeereid(fd, &uid, &gid) == 0 && uid == geteuid();
+}
+
+bool ConfigureAccepted(int fd) {
+  int fd_flags = fcntl(fd, F_GETFD);
+  int status_flags = fcntl(fd, F_GETFL);
+  return fd_flags >= 0 && status_flags >= 0 &&
+         fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) == 0 &&
+         fcntl(fd, F_SETFL, status_flags & ~O_NONBLOCK) == 0;
+}
+
+bool SendFramedResponse(int fd,
+                        std::string_view response,
+                        base::TimeTicks deadline) {
+  if (response.size() > limitless::kMaximumPreferenceTransportResponseBytes ||
+      response.size() > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  const uint32_t frame_size = htonl(static_cast<uint32_t>(response.size()));
+  return WriteExactly(fd, base::byte_span_from_ref(frame_size), deadline) &&
+         WriteExactly(fd, base::as_byte_span(response), deadline);
+}
 
 constexpr mode_t kPrivateFileMode = S_IRUSR | S_IWUSR;
 constexpr mode_t kPrivateDirectoryMode = S_IRWXU;
@@ -674,8 +767,114 @@ PreferenceControlTransportWorker::Prepare() {
   return result;
 }
 
-void PreferenceControlTransportWorker::Run() {
+void PreferenceControlTransportWorker::DispatchToOrigin(
+    OriginRequestHandler handler,
+    std::string payload,
+    base::TimeTicks deadline,
+    scoped_refptr<PendingRequest> pending) {
+  if (!pending->TryBeginHandling()) {
+    return;
+  }
+  handler.Run(std::move(payload), deadline, std::move(pending));
+}
+
+void PreferenceControlTransportWorker::Run(
+    scoped_refptr<base::SequencedTaskRunner> origin_task_runner,
+    OriginRequestHandler handler) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  base::ScopedClosureRunner cleanup(base::BindOnce(
+      &PreferenceControlTransportWorker::Cleanup, base::Unretained(this)));
+  if (!published_ || !listener_.is_valid() ||
+      !cancellation_reader_.is_valid() || !origin_task_runner ||
+      origin_task_runner->RunsTasksInCurrentSequence() || handler.is_null()) {
+    return;
+  }
+  while (!cancellation_->cancelled.load(std::memory_order_acquire)) {
+    if (inputs_.entering_accept_wait_for_testing) {
+      inputs_.entering_accept_wait_for_testing.Run();
+    }
+    pollfd fds[] = {{listener_.get(), POLLIN, 0},
+                    {cancellation_reader_.get(), POLLIN, 0}};
+    int ready = poll(fds, 2, -1);
+    if (ready < 0 && errno == EINTR) {
+      continue;
+    }
+    if (ready <= 0 || fds[1].revents != 0) {
+      break;
+    }
+    if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      break;
+    }
+    if (!(fds[0].revents & POLLIN)) {
+      continue;
+    }
+    base::ScopedFD connection(accept(listener_.get(), nullptr, nullptr));
+    if (!connection.is_valid()) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+        continue;
+      }
+      break;
+    }
+    if (!ConfigureAccepted(connection.get())) {
+      continue;
+    }
+    if (inputs_.accepted_fd_for_testing) {
+      inputs_.accepted_fd_for_testing.Run(connection.get());
+    }
+    uint64_t token = cancellation_->InstallAcceptedFd(connection.get());
+    if (!token || cancellation_->cancelled.load(std::memory_order_acquire)) {
+      if (token) {
+        cancellation_->ClearActive(token);
+      }
+      continue;
+    }
+    base::ScopedClosureRunner clear_token(base::BindOnce(
+        &TransportCancellationState::ClearActive, cancellation_, token));
+    if (!IsCurrentUserPeer(connection.get())) {
+      continue;
+    }
+    const base::TimeTicks deadline =
+        base::TimeTicks::Now() + (inputs_.io_timeout_for_testing.is_zero()
+                                      ? kTransportIoTimeout
+                                      : inputs_.io_timeout_for_testing);
+    uint32_t network_size = 0;
+    if (!ReadExactly(connection.get(), base::byte_span_from_ref(network_size),
+                     deadline)) {
+      continue;
+    }
+    const size_t size = ntohl(network_size);
+    if (size == 0 || size > kMaximumPreferenceRequestBytes) {
+      const std::string error = SerializePreferenceRequestParseError(
+          PreferenceRequestParseStatus::kOversized);
+      SendFramedResponse(connection.get(), error, deadline);
+      continue;
+    }
+    std::string payload(size, '\0');
+    if (!ReadExactly(connection.get(), base::as_writable_byte_span(payload),
+                     deadline)) {
+      continue;
+    }
+    auto pending = base::MakeRefCounted<PendingRequest>(deadline);
+    if (!cancellation_->InstallPendingRequest(token, pending) ||
+        cancellation_->cancelled.load(std::memory_order_acquire)) {
+      pending->Cancel();
+      continue;
+    }
+    if (!origin_task_runner->PostTask(
+            FROM_HERE,
+            base::BindOnce(&PreferenceControlTransportWorker::DispatchToOrigin,
+                           handler, std::move(payload), deadline, pending))) {
+      pending->Cancel();
+      continue;
+    }
+    std::string response;
+    if (!pending->Wait(&response) ||
+        cancellation_->cancelled.load(std::memory_order_acquire) ||
+        response.size() > kMaximumPreferenceTransportResponseBytes) {
+      continue;
+    }
+    SendFramedResponse(connection.get(), response, deadline);
+  }
 }
 
 void PreferenceControlTransportWorker::Cleanup() {

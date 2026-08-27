@@ -18,6 +18,7 @@
 #include "base/sequence_checker.h"
 #include "base/synchronization/condition_variable.h"
 #include "base/synchronization/lock.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 
 namespace limitless {
@@ -91,6 +92,9 @@ class PreferenceControlTransportWorker {
     base::RepeatingClosure before_socket_bind_for_testing;
     base::RepeatingClosure before_credential_publication_for_testing;
     base::RepeatingClosure before_descriptor_publication_for_testing;
+    base::TimeDelta io_timeout_for_testing;
+    base::RepeatingCallback<void(int)> accepted_fd_for_testing;
+    base::RepeatingClosure entering_accept_wait_for_testing;
   };
   enum class WorkerPrepareStatus {
     kSuccess,
@@ -115,10 +119,22 @@ class PreferenceControlTransportWorker {
       scoped_refptr<TransportCancellationState> cancellation);
   ~PreferenceControlTransportWorker();
   PrepareResult Prepare();
-  void Run();
+  // Invoked on the supplied origin sequence only after the worker has
+  // atomically claimed `pending`. The handler must call Complete, but must not
+  // call TryBeginHandling again.
+  using OriginRequestHandler =
+      base::RepeatingCallback<void(std::string payload,
+                                   base::TimeTicks deadline,
+                                   scoped_refptr<PendingRequest> pending)>;
+  void Run(scoped_refptr<base::SequencedTaskRunner> origin_task_runner,
+           OriginRequestHandler handler);
   void Cleanup();
 
  private:
+  static void DispatchToOrigin(OriginRequestHandler handler,
+                               std::string payload,
+                               base::TimeTicks deadline,
+                               scoped_refptr<PendingRequest> pending);
   PrepareResult FailPrepare(WorkerPrepareStatus status);
 
   SEQUENCE_CHECKER(sequence_checker_);
