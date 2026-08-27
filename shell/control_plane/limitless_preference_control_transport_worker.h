@@ -11,6 +11,7 @@
 
 #include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
+#include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
 #include "base/sequence_checker.h"
 #include "base/synchronization/lock.h"
@@ -48,8 +49,8 @@ class PreferenceControlTransportWorker {
     std::string instance_id;
     std::string capability;
     bool force_post_bind_failure = false;
-    std::function<void()> before_credential_publication;
-    std::function<void()> before_descriptor_publication;
+    base::RepeatingClosure before_credential_publication_for_testing;
+    base::RepeatingClosure before_descriptor_publication_for_testing;
   };
   enum class WorkerPrepareStatus {
     kSuccess,

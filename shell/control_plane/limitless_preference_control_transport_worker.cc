@@ -23,6 +23,8 @@ constexpr mode_t kPrivateDirectoryMode = S_IRWXU;
 
 enum class PathCheck { kAbsent, kExists, kError };
 
+enum class PublishResult { kSuccess, kCollision, kFailure };
+
 bool FsyncNoIntr(int fd) {
   for (;;) {
     if (fsync(fd) == 0) {
@@ -160,7 +162,7 @@ bool QuarantineOwnedArtifactAt(
   return true;
 }
 
-bool WritePrivateFileNoReplaceAt(
+PublishResult WritePrivateFileNoReplaceAt(
     int directory_fd,
     const std::string& basename,
     std::string_view value,
@@ -181,11 +183,11 @@ bool WritePrivateFileNoReplaceAt(
       break;
     }
     if (errno != EEXIST) {
-      return false;
+      return PublishResult::kFailure;
     }
   }
   if (!fd.is_valid()) {
-    return false;
+    return PublishResult::kFailure;
   }
 
   struct stat temporary_stat = {};
@@ -194,7 +196,7 @@ bool WritePrivateFileNoReplaceAt(
       !S_ISREG(temporary_stat.st_mode) || temporary_stat.st_uid != geteuid() ||
       (temporary_stat.st_mode & 0777) != kPrivateFileMode) {
     UnlinkAt(directory_fd, temporary_basename);
-    return false;
+    return PublishResult::kFailure;
   }
 
   size_t offset = 0;
@@ -211,15 +213,17 @@ bool WritePrivateFileNoReplaceAt(
   }
   if (offset != value.size() || !FsyncNoIntr(fd.get())) {
     UnlinkAt(directory_fd, temporary_basename);
-    return false;
+    return PublishResult::kFailure;
   }
 
   const limitless::ArtifactIdentity temporary_identity = {
       temporary_stat.st_dev, temporary_stat.st_ino};
   if (renameatx_np(directory_fd, temporary_basename.c_str(), directory_fd,
                    basename.c_str(), RENAME_EXCL) != 0) {
+    const int rename_error = errno;
     UnlinkAt(directory_fd, temporary_basename);
-    return false;
+    return rename_error == EEXIST ? PublishResult::kCollision
+                                  : PublishResult::kFailure;
   }
 
   limitless::ArtifactIdentity final_identity;
@@ -235,12 +239,12 @@ bool WritePrivateFileNoReplaceAt(
                               temporary_identity, fd.get());
     UnlinkAt(directory_fd, temporary_basename);
     FsyncNoIntr(directory_fd);
-    return false;
+    return PublishResult::kFailure;
   }
 
   *published_identity = final_identity;
   *published_identity_fd = std::move(fd);
-  return true;
+  return PublishResult::kSuccess;
 }
 
 }  // namespace
@@ -426,25 +430,27 @@ PreferenceControlTransportWorker::Prepare() {
     return result;
   }
   cancellation_->InstallWriter(pipe_fds[1]);
-  if (inputs_.before_credential_publication) {
-    inputs_.before_credential_publication();
+  if (inputs_.before_credential_publication_for_testing) {
+    inputs_.before_credential_publication_for_testing.Run();
   }
   if (cancellation_->cancelled.load(std::memory_order_acquire)) {
     result.status = WorkerPrepareStatus::kCancelled;
     Cleanup();
     return result;
   }
-  if (cancellation_->cancelled.load(std::memory_order_acquire) ||
-      !WritePrivateFileNoReplaceAt(
-          runtime_directory_fd_.get(), credential_basename, inputs_.capability,
-          &credential_identity_, &credential_identity_fd_)) {
-    result.status = WorkerPrepareStatus::kCredential;
+  const PublishResult credential_publish_result = WritePrivateFileNoReplaceAt(
+      runtime_directory_fd_.get(), credential_basename, inputs_.capability,
+      &credential_identity_, &credential_identity_fd_);
+  if (credential_publish_result != PublishResult::kSuccess) {
+    result.status = credential_publish_result == PublishResult::kCollision
+                        ? WorkerPrepareStatus::kCollision
+                        : WorkerPrepareStatus::kCredential;
     Cleanup();
     return result;
   }
   owns_credential_ = true;
-  if (inputs_.before_descriptor_publication) {
-    inputs_.before_descriptor_publication();
+  if (inputs_.before_descriptor_publication_for_testing) {
+    inputs_.before_descriptor_publication_for_testing.Run();
   }
   if (cancellation_->cancelled.load(std::memory_order_acquire)) {
     result.status = WorkerPrepareStatus::kCancelled;
@@ -464,11 +470,13 @@ PreferenceControlTransportWorker::Prepare() {
     Cleanup();
     return result;
   }
-  if (cancellation_->cancelled.load(std::memory_order_acquire) ||
-      !WritePrivateFileNoReplaceAt(
-          runtime_directory_fd_.get(), descriptor_basename, descriptor,
-          &descriptor_identity_, &descriptor_identity_fd_)) {
-    result.status = WorkerPrepareStatus::kDescriptor;
+  const PublishResult descriptor_publish_result = WritePrivateFileNoReplaceAt(
+      runtime_directory_fd_.get(), descriptor_basename, descriptor,
+      &descriptor_identity_, &descriptor_identity_fd_);
+  if (descriptor_publish_result != PublishResult::kSuccess) {
+    result.status = descriptor_publish_result == PublishResult::kCollision
+                        ? WorkerPrepareStatus::kCollision
+                        : WorkerPrepareStatus::kDescriptor;
     Cleanup();
     return result;
   }

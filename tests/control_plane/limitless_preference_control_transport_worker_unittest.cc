@@ -16,6 +16,12 @@
 
 namespace limitless {
 namespace {
+void CancelState(scoped_refptr<TransportCancellationState> state) {
+  state->Cancel();
+}
+void WriteForeignDescriptor(base::FilePath path) {
+  base::WriteFile(path, "foreign-descriptor");
+}
 struct Evidence {
   PreferenceControlTransportWorker::PrepareResult result;
   bool socket = false;
@@ -34,6 +40,7 @@ struct Evidence {
   bool socket_removed = false;
   bool token_removed = false;
   bool descriptor_removed = false;
+  bool residue_free = true;
 };
 PreferenceControlTransportWorker::Inputs Inputs(const base::FilePath& p) {
   return {p.AppendASCII("r"),
@@ -67,6 +74,16 @@ Evidence Journey(PreferenceControlTransportWorker::Inputs in,
   e.socket_removed = !base::PathExists(e.result.socket_path);
   e.token_removed = !base::PathExists(e.result.credential_path);
   e.descriptor_removed = !base::PathExists(e.result.descriptor_path);
+  base::FileEnumerator leftovers(e.result.socket_path.DirName(), false,
+                                 base::FileEnumerator::FILES);
+  for (base::FilePath path = leftovers.Next(); !path.empty();
+       path = leftovers.Next()) {
+    const std::string name = path.BaseName().value();
+    if (name.find(".limitless-publish-") != std::string::npos ||
+        name.find(".limitless-quarantine-") != std::string::npos) {
+      e.residue_free = false;
+    }
+  }
   return e;
 }
 Evidence RunWorker(PreferenceControlTransportWorker::Inputs in,
@@ -123,6 +140,7 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   EXPECT_TRUE(e.socket_removed);
   EXPECT_TRUE(e.token_removed);
   EXPECT_TRUE(e.descriptor_removed);
+  EXPECT_TRUE(e.residue_free);
 }
 TEST(LimitlessPreferenceControlTransportWorkerTest,
      CancelBeforePreparePublishesNothingAndReturnsCancelled) {
@@ -304,6 +322,61 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
           Inputs(t.GetPath())),
       future.GetCallback());
   EXPECT_TRUE(future.Take());
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     OverlongSocketNameReturnsSocket) {
+  base::test::TaskEnvironment env;
+  base::ScopedTempDir t;
+  ASSERT_TRUE(t.CreateUniqueTempDir());
+  auto in = Inputs(t.GetPath());
+  in.socket_path = in.runtime_directory.AppendASCII(std::string(200, 'x'));
+  Evidence e =
+      RunWorker(in, base::MakeRefCounted<TransportCancellationState>());
+  EXPECT_EQ(e.result.status,
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kSocket);
+  EXPECT_FALSE(e.socket);
+  EXPECT_FALSE(e.token);
+  EXPECT_FALSE(e.descriptor);
+  EXPECT_TRUE(e.residue_free);
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     CredentialHookCancelsAndRollsBack) {
+  base::test::TaskEnvironment env;
+  base::ScopedTempDir t;
+  ASSERT_TRUE(t.CreateUniqueTempDir());
+  auto cancel = base::MakeRefCounted<TransportCancellationState>();
+  auto in = Inputs(t.GetPath());
+  in.before_credential_publication_for_testing =
+      base::BindRepeating(&CancelState, cancel);
+  Evidence e = RunWorker(in, cancel);
+  EXPECT_EQ(e.result.status,
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kCancelled);
+  EXPECT_FALSE(e.socket);
+  EXPECT_FALSE(e.token);
+  EXPECT_TRUE(e.residue_free);
+  EXPECT_FALSE(e.descriptor);
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     DescriptorHookCollisionPreservesForeign) {
+  base::test::TaskEnvironment env;
+  base::ScopedTempDir t;
+  ASSERT_TRUE(t.CreateUniqueTempDir());
+  auto in = Inputs(t.GetPath());
+  in.before_descriptor_publication_for_testing =
+      base::BindRepeating(&WriteForeignDescriptor, in.descriptor_path);
+  Evidence e =
+      RunWorker(in, base::MakeRefCounted<TransportCancellationState>());
+  std::string foreign;
+  ASSERT_TRUE(base::ReadFileToString(in.descriptor_path, &foreign));
+  EXPECT_EQ(foreign, "foreign-descriptor");
+  EXPECT_FALSE(e.result.succeeded);
+  EXPECT_EQ(e.result.status,
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kCollision);
+  EXPECT_FALSE(e.socket);
+  EXPECT_FALSE(e.token);
 }
 }  // namespace
 }  // namespace limitless
