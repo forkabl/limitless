@@ -216,9 +216,6 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
         std::to_string(base::GetCurrentProcId()) + "-" + endpoint_name +
         ".sock";
     socket_path_ = base::FilePath("/tmp").AppendASCII(short_endpoint);
-    if (socket_path_.value().size() >= sizeof(address.sun_path)) {
-      return PreferenceControlTransportStartStatus::kPathTooLong;
-    }
   }
 
   base::ScopedFD listen_fd(socket(AF_UNIX, SOCK_STREAM, 0));
