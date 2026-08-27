@@ -2,11 +2,13 @@
 
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/json/json_reader.h"
 #include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include <sys/stat.h>
 
 namespace limitless {
 namespace {
@@ -15,6 +17,15 @@ struct Evidence {
   bool socket = false;
   bool token = false;
   bool descriptor = false;
+  std::string token_contents;
+  std::string descriptor_contents;
+  struct stat runtime_stat = {};
+  struct stat socket_stat = {};
+  struct stat token_stat = {};
+  struct stat descriptor_stat = {};
+  bool socket_removed = false;
+  bool token_removed = false;
+  bool descriptor_removed = false;
 };
 PreferenceControlTransportWorker::Inputs Inputs(const base::FilePath& p) {
   return {p.AppendASCII("r"),
@@ -27,12 +38,20 @@ PreferenceControlTransportWorker::Inputs Inputs(const base::FilePath& p) {
 }
 Evidence Journey(PreferenceControlTransportWorker::Inputs in,
                  scoped_refptr<TransportCancellationState> c) {
-  PreferenceControlTransportWorker w(std::move(in), c);
   Evidence e;
-  e.result = w.Prepare();
-  e.socket = base::PathExists(e.result.socket_path);
-  e.token = base::PathExists(e.result.credential_path);
-  e.descriptor = base::PathExists(e.result.descriptor_path);
+  { PreferenceControlTransportWorker w(std::move(in), c);
+    e.result = w.Prepare();
+    e.socket = base::PathExists(e.result.socket_path);
+    e.token = base::ReadFileToString(e.result.credential_path, &e.token_contents);
+    e.descriptor = base::ReadFileToString(e.result.descriptor_path, &e.descriptor_contents);
+    stat(e.result.socket_path.value().c_str(), &e.socket_stat);
+    stat(e.result.credential_path.value().c_str(), &e.token_stat);
+    stat(e.result.descriptor_path.value().c_str(), &e.descriptor_stat);
+    stat(e.result.socket_path.DirName().value().c_str(), &e.runtime_stat);
+  }
+  e.socket_removed = !base::PathExists(e.result.socket_path);
+  e.token_removed = !base::PathExists(e.result.credential_path);
+  e.descriptor_removed = !base::PathExists(e.result.descriptor_path);
   return e;
 }
 Evidence RunWorker(PreferenceControlTransportWorker::Inputs in,
@@ -55,8 +74,16 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   EXPECT_TRUE(e.socket);
   EXPECT_TRUE(e.token);
   EXPECT_TRUE(e.descriptor);
-  EXPECT_FALSE(base::PathExists(in.credential_path));
-  EXPECT_FALSE(base::PathExists(in.descriptor_path));
+  EXPECT_EQ(e.token_contents, "cap");
+  EXPECT_NE(e.descriptor_contents.find("\"profile_id\":\"p\""), std::string::npos);
+  EXPECT_TRUE(S_ISSOCK(e.socket_stat.st_mode));
+  EXPECT_EQ(e.socket_stat.st_uid, geteuid());
+  EXPECT_EQ(e.token_stat.st_mode & 0777, 0600);
+  EXPECT_EQ(e.descriptor_stat.st_mode & 0777, 0600);
+  EXPECT_EQ(e.runtime_stat.st_mode & 0777, 0700);
+  EXPECT_TRUE(e.socket_removed);
+  EXPECT_TRUE(e.token_removed);
+  EXPECT_TRUE(e.descriptor_removed);
 }
 TEST(LimitlessPreferenceControlTransportWorkerTest,
      CancelBeforePreparePublishesNothingAndReturnsCancelled) {
@@ -82,6 +109,7 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   EXPECT_EQ(e.result.status,
             PreferenceControlTransportWorker::WorkerPrepareStatus::kCollision);
   EXPECT_TRUE(base::PathExists(in.socket_path));
+  std::string foreign; ASSERT_TRUE(base::ReadFileToString(in.socket_path, &foreign)); EXPECT_EQ(foreign, "foreign");
 }
 TEST(LimitlessPreferenceControlTransportWorkerTest,
      NonEnoentPreflightErrorFailsClosed) {
