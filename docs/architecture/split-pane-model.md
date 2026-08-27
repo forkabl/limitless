@@ -19,10 +19,11 @@ product-owned, per-window `SplitPaneController` may use the richer public
 `TabStripModel` split APIs and observe `OnSplitTabChanged` for layout, ratio,
 order, membership, and transfer changes that `TabListInterface` does not
 expose. This direct dependency stays isolated in the adapter and needs no
-product-specific mutation API. Two independent generic Chromium seams are
-still required: a hostile-session ratio parser safety fix and the desktop
-Views drag-completion observer described below. They are exported as separate
-patches with separate removal conditions and tests.
+product-specific mutation API. Three independent generic Chromium fixes remain
+in the series: hostile-session ratio validation, the desktop Views
+drag-completion observer described below, and macOS child-modal reactivation
+through the existing topmost-dialog focus contract. They are exported as
+separate patches with separate removal conditions and tests.
 
 The adapter stores only its window/model lifetime references. Every snapshot
 is rebuilt from live `TabInterface`, `SplitTabCollection`, and
@@ -64,6 +65,12 @@ Focus first activates that exact member through `TabListInterface`, then uses
 Chromium's supported browser focus command to move the first responder into
 the active page. Tests prove both active-member state and real page typing;
 model activation alone is insufficient.
+Every resolver and activation boundary is observer-capable. The controller
+holds only WeakPtr lifetime authority across those callbacks, re-resolves the
+exact product pair and active member after activation, and never invokes a
+stale focus controller after its owner is destroyed. On macOS, Chromium's
+generic topmost-dialog focus path must also reactivate a visible child dialog
+after the native rail makes the browser window key.
 The native UI exposes 25/75, 50/50, and 75/25 ratio choices. The adapter
 accepts only finite ratios in the inclusive range 0.25 through 0.75 for this
 milestone. Layout changes reset the ratio to 0.5, matching Chromium's existing
@@ -84,7 +91,9 @@ focus other pane, grow, shrink, orientation, swap, and unsplit. Until then,
 A close result means Chromium accepted the close request. Before-unload or
 tab-modal UI may defer or cancel it. Authoritative close/removal notifications,
 not the synchronous return value, decide whether promotion completed. The
-prompt journey must cover both cancel and accept.
+before-unload journey covers both cancel and accept. A separate real page
+prompt journey proves exact split-pane host selection and macOS child-window
+focus without treating app-modal before-unload UI as pane-modal evidence.
 
 ## Workspace and window reconciliation
 
@@ -291,10 +300,14 @@ controller and native journeys cover exact same-window and workspace behavior,
 stale-pair rejection, read-only edit projection, and the supported transfer
 policy. Clean restart additionally covers exact pair order, both layouts,
 25/50/75 ratios, selected-page input routing, workspace precedence, malformed
-product metadata, and duplicate product tab UUID repair. Follow-up bounded
-journeys must cover the remaining hostile multiwindow, regular-profile,
-cross-profile, private, popup, teardown, page-crash, prompt, and fullscreen
-cases without counting unrelated workspace-only coverage as split acceptance.
+product metadata, and duplicate product tab UUID repair. The first
+hostile-lifecycle checkpoint adds real before-unload cancel and accept
+behavior, exact pane-hosted JavaScript prompt focus, renderer input after
+dismissal, focus-controller destruction guards, and workspace-controller
+destruction during split reconciliation. Follow-up bounded journeys must cover
+the remaining hostile multiwindow, regular-profile, cross-profile, private,
+popup, teardown, page-crash, and fullscreen cases without counting unrelated
+workspace-only coverage as split acceptance.
 
 The tests may inspect `MultiContentsView` and Chromium model state after the
 native action, but must not use those internals to perform the user action.

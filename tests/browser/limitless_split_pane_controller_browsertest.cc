@@ -5,6 +5,7 @@
 #include "limitless_split_pane_controller.h"
 
 #include <algorithm>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,15 +16,20 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
+#include "base/scoped_observation.h"
 #include "base/strings/strcat.h"
 #include "base/test/run_until.h"
 #include "chrome/browser/tab_list/tab_list_interface.h"
+#include "chrome/browser/tab_list/tab_list_interface_observer.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/focus/browser_focus_controller.h"
+#include "chrome/browser/ui/location_bar/location_bar.h"
+#include "chrome/browser/ui/omnibox/omnibox_view.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/split_tabs/split_tab_id.h"
 #include "components/tabs/public/split_tab_data.h"
@@ -49,8 +55,10 @@ class LimitlessSplitPaneControllerBrowserTest
   }
 
   void TearDownOnMainThread() override {
-    workspace_controller_->Stop();
-    workspace_controller_.reset();
+    if (workspace_controller_) {
+      workspace_controller_->Stop();
+      workspace_controller_.reset();
+    }
     SplitPaneBrowserTestBase::TearDownOnMainThread();
   }
 
@@ -127,6 +135,80 @@ class StopAndDestroySplitPaneControllerObserver final
  private:
   raw_ptr<TabStripModel> model_;
   raw_ptr<std::unique_ptr<SplitPaneController>> owner_ = nullptr;
+};
+
+class StopAndDestroyWorkspaceControllerObserver final
+    : public TabStripModelObserver {
+ public:
+  explicit StopAndDestroyWorkspaceControllerObserver(TabStripModel* model)
+      : model_(model) {
+    CHECK(model_);
+    model_->AddObserver(this);
+  }
+
+  ~StopAndDestroyWorkspaceControllerObserver() override {
+    if (model_) {
+      model_->RemoveObserver(this);
+    }
+  }
+
+  void Arm(std::unique_ptr<WorkspaceController>* owner) {
+    CHECK(owner);
+    CHECK(*owner);
+    owner_ = owner;
+  }
+
+  void OnSplitTabChanged(const SplitTabChange&) override {
+    if (!owner_) {
+      return;
+    }
+    ++invocation_count_;
+    std::unique_ptr<WorkspaceController>* owner =
+        std::exchange(owner_, nullptr);
+    (*owner)->Stop();
+    owner->reset();
+  }
+
+  void OnTabStripModelDestroyed(TabStripModel* model) override {
+    if (model == model_) {
+      model_ = nullptr;
+    }
+  }
+
+  int invocation_count() const { return invocation_count_; }
+
+ private:
+  raw_ptr<TabStripModel> model_;
+  raw_ptr<std::unique_ptr<WorkspaceController>> owner_ = nullptr;
+  int invocation_count_ = 0;
+};
+
+class RunOnceOnActiveTabChangedObserver final
+    : public TabListInterfaceObserver {
+ public:
+  RunOnceOnActiveTabChangedObserver(TabListInterface* tab_list,
+                                    base::OnceClosure callback)
+      : callback_(std::move(callback)) {
+    CHECK(tab_list);
+    observation_.Observe(tab_list);
+  }
+
+  void OnActiveTabChanged(TabListInterface&, tabs::TabInterface*) override {
+    if (callback_) {
+      std::move(callback_).Run();
+    }
+  }
+
+  void OnTabListDestroyed(TabListInterface& tab_list) override {
+    if (observation_.IsObservingSource(&tab_list)) {
+      observation_.Reset();
+    }
+  }
+
+ private:
+  base::OnceClosure callback_;
+  base::ScopedObservation<TabListInterface, TabListInterfaceObserver>
+      observation_{this};
 };
 
 std::string BuildWorkspaceTabSessionData(
@@ -306,6 +388,58 @@ IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
   EXPECT_FALSE(second.Get()->IsSplit());
 }
 
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSplitPaneControllerBrowserTest,
+    ReconcileWorkspaceOwnerDestructionDoesNotUseStaleController) {
+  const std::string default_workspace =
+      *workspace_controller_->GetSnapshot().active_workspace_identifier;
+  std::vector<tabs::TabHandle> members;
+  for (const std::u16string& name :
+       {u"First", u"Second", u"Third", u"Fourth"}) {
+    ASSERT_TRUE(workspace_controller_->CreateWorkspace(name).succeeded());
+    members.push_back(workspace_controller_->GetSnapshot().active_tab.value());
+  }
+  ASSERT_TRUE(
+      workspace_controller_->SwitchWorkspace(default_workspace).succeeded());
+
+  TabListInterface* tab_list = TabListInterface::From(browser());
+  TabStripModel* model = browser()->GetTabStripModel();
+  ASSERT_TRUE(tab_list->CreateSplit({members[0], members[1]}));
+  ASSERT_TRUE(tab_list->CreateSplit({members[2], members[3]}));
+  const auto split_ids = model->ListSplits();
+  ASSERT_EQ(2u, split_ids.size());
+  const auto split_id = split_ids.begin();
+  const split_tabs::SplitTabId first_reconciled = *split_id;
+  const split_tabs::SplitTabId remaining = *std::next(split_id);
+
+  int state_change_count = 0;
+  auto controller = std::make_unique<SplitPaneController>(
+      browser(),
+      base::BindRepeating([](int* count) { ++*count; }, &state_change_count));
+  StopAndDestroyWorkspaceControllerObserver observer(model);
+  observer.Arm(&workspace_controller_);
+
+  controller->ReconcileWorkspaceState();
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(1, observer.invocation_count());
+  EXPECT_EQ(nullptr, WorkspaceController::From(browser()));
+  EXPECT_FALSE(model->ContainsSplit(first_reconciled));
+  ASSERT_TRUE(model->ContainsSplit(remaining));
+  const std::vector<tabs::TabInterface*> remaining_members =
+      model->GetSplitData(remaining)->ListTabs();
+  ASSERT_EQ(2u, remaining_members.size());
+  EXPECT_EQ(remaining, remaining_members[0]->GetSplit());
+  EXPECT_EQ(remaining, remaining_members[1]->GetSplit());
+  EXPECT_EQ(SplitPaneOperationStatus::kWorkspaceUnavailable,
+            controller->GetSnapshot().availability_status);
+  EXPECT_GT(state_change_count, 0);
+
+  controller->Stop();
+  controller.reset();
+  tab_list->Unsplit(remaining);
+}
+
 IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
                        MissingFocusCapabilityDoesNotActivateMember) {
   tabs::TabInterface* initial = browser()->GetTabStripModel()->GetActiveTab();
@@ -332,6 +466,116 @@ IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
   EXPECT_EQ(SplitPaneOperationStatus::kFocusUnavailable,
             controller->FocusPane(pair, inactive_member).status);
   EXPECT_EQ(active_before, browser()->GetTabStripModel()->GetActiveTab());
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSplitPaneControllerBrowserTest,
+    FocusPanePreflightResolverMayDestroyControllerWithoutActivatingMember) {
+  tabs::TabInterface* initial = browser()->GetTabStripModel()->GetActiveTab();
+  ASSERT_TRUE(initial);
+  const tabs::TabHandle first = initial->GetHandle();
+  const tabs::TabHandle second = AddTab();
+  ASSERT_TRUE(TabListInterface::From(browser())->CreateSplit({first, second}));
+  std::unique_ptr<SplitPaneController> controller;
+  controller = std::make_unique<SplitPaneController>(
+      browser(), base::DoNothing(),
+      base::BindRepeating(
+          [](std::unique_ptr<SplitPaneController>* owner,
+             Browser* target_browser) {
+            owner->reset();
+            return BrowserFocusController::From(target_browser);
+          },
+          &controller, browser()));
+  const SplitPanePairTarget pair = OnlyPairTarget(*controller);
+  ASSERT_EQ(second.Get(), browser()->GetTabStripModel()->GetActiveTab());
+
+  const SplitPaneOperationResult result =
+      controller->FocusPane(pair, IdentifierFor(first));
+
+  EXPECT_EQ(SplitPaneOperationStatus::kWindowUnavailable, result.status);
+  EXPECT_FALSE(controller);
+  EXPECT_EQ(second.Get(), browser()->GetTabStripModel()->GetActiveTab());
+  ASSERT_TRUE(first.Get()->GetSplit());
+  TabListInterface::From(browser())->Unsplit(first.Get()->GetSplit().value());
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSplitPaneControllerBrowserTest,
+    FocusPanePostActivationResolverMayDestroyControllerWithoutContinuing) {
+  tabs::TabInterface* initial = browser()->GetTabStripModel()->GetActiveTab();
+  ASSERT_TRUE(initial);
+  const tabs::TabHandle first = initial->GetHandle();
+  const tabs::TabHandle second = AddTab();
+  ASSERT_TRUE(TabListInterface::From(browser())->CreateSplit({first, second}));
+  int resolver_calls = 0;
+  std::unique_ptr<SplitPaneController> controller;
+  controller = std::make_unique<SplitPaneController>(
+      browser(), base::DoNothing(),
+      base::BindRepeating(
+          [](int* calls, std::unique_ptr<SplitPaneController>* owner,
+             Browser* target_browser) {
+            ++*calls;
+            if (*calls == 2) {
+              BrowserWindow::FromBrowser(target_browser)
+                  ->GetLocationBar()
+                  ->FocusLocation(/*is_user_initiated=*/false,
+                                  /*clear_focus_if_failed=*/true);
+              owner->reset();
+            }
+            return BrowserFocusController::From(target_browser);
+          },
+          &resolver_calls, &controller, browser()));
+  const SplitPanePairTarget pair = OnlyPairTarget(*controller);
+  ASSERT_EQ(second.Get(), browser()->GetTabStripModel()->GetActiveTab());
+
+  const SplitPaneOperationResult result =
+      controller->FocusPane(pair, IdentifierFor(first));
+
+  EXPECT_EQ(2, resolver_calls);
+  EXPECT_EQ(SplitPaneOperationStatus::kWindowUnavailable, result.status);
+  EXPECT_FALSE(controller);
+  EXPECT_EQ(first.Get(), browser()->GetTabStripModel()->GetActiveTab());
+  auto* omnibox =
+      static_cast<OmniboxViewViews*>(BrowserWindow::FromBrowser(browser())
+                                         ->GetLocationBar()
+                                         ->GetOmniboxView());
+  EXPECT_TRUE(omnibox->HasFocus());
+  ASSERT_TRUE(first.Get()->GetSplit());
+  TabListInterface::From(browser())->Unsplit(first.Get()->GetSplit().value());
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSplitPaneControllerBrowserTest,
+    FocusPaneActivationMayDestroyControllerWithoutContinuingFocusRoute) {
+  tabs::TabInterface* initial = browser()->GetTabStripModel()->GetActiveTab();
+  ASSERT_TRUE(initial);
+  const tabs::TabHandle first = initial->GetHandle();
+  const tabs::TabHandle second = AddTab();
+  const WorkspaceWindowSnapshot workspace_snapshot =
+      workspace_controller_->GetSnapshot();
+  auto controller =
+      std::make_unique<SplitPaneController>(browser(), base::DoNothing());
+  ASSERT_TRUE(controller
+                  ->CreateSplit(workspace_snapshot.window_identifier,
+                                IdentifierFor(first), IdentifierFor(second))
+                  .succeeded());
+  const SplitPanePairTarget pair = OnlyPairTarget(*controller);
+  ASSERT_EQ(second.Get(), browser()->GetTabStripModel()->GetActiveTab());
+  RunOnceOnActiveTabChangedObserver observer(
+      TabListInterface::From(browser()),
+      base::BindOnce(
+          [](std::unique_ptr<SplitPaneController>* owner) { owner->reset(); },
+          &controller));
+
+  const SplitPaneOperationResult result =
+      controller->FocusPane(pair, IdentifierFor(first));
+
+  EXPECT_EQ(SplitPaneOperationStatus::kWindowUnavailable, result.status);
+  EXPECT_FALSE(controller);
+  EXPECT_EQ(first.Get(), browser()->GetTabStripModel()->GetActiveTab());
+  ASSERT_TRUE(first.Get()->GetSplit());
+  EXPECT_EQ(first.Get()->GetSplit(), second.Get()->GetSplit());
+  TabListInterface::From(browser())->Unsplit(first.Get()->GetSplit().value());
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,

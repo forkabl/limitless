@@ -321,6 +321,31 @@
         "Chromium provides a supported external interactive browser-test dependency seam."
       ],
       "removal_condition": "Remove this test-only patch when Chromium provides a supported external interactive browser-test dependency seam, or remove it with the native split-pane journey."
+    },
+    {
+      "file": "0011-macos-modal-dialog-reactivation.patch",
+      "sha256": "3cc12ba82a35bbb1647de2accba08a991910b392d328fec51ea16de1504f36ec",
+      "upstream_files": [
+        "components/constrained_window/native_web_contents_modal_dialog_manager_views.cc"
+      ],
+      "upstream_symbols": [
+        "NativeWebContentsModalDialogManagerViews::Focus"
+      ],
+      "limitless_targets": [
+        "$limitless_root/build/chromium:swiftui_browser_tests",
+        "$limitless_root/shell/native/swiftui_rail:rail"
+      ],
+      "tests": [
+        "//chrome/test:browser_tests --gtest_filter=LimitlessSwiftUIBrowserTest.SplitJavaScriptPromptUsesExactPaneHostAndRetainsNativeFocusRoute",
+        "//chrome/test:browser_tests --gtest_filter=LimitlessSwiftUIBrowserTest.*Split*:LimitlessSplitPaneControllerBrowserTest.*"
+      ],
+      "conflict_signals": [
+        "NativeWebContentsModalDialogManagerViews stops owning non-Aura child-dialog focus.",
+        "Widget::Activate no longer makes a visible macOS child dialog key.",
+        "WebContentsModalDialogManager::FocusTopmostDialog gains equivalent macOS child-window reactivation before this implementation.",
+        "Tab-modal dialogs stop using NativeWebContentsModalDialogManagerViews on macOS."
+      ],
+      "removal_condition": "Remove this patch when Chromium reactivates a visible macOS child modal through its supported FocusTopmostDialog path after the parent window has taken key focus."
     }
   ]
 }

@@ -14,6 +14,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,7 @@
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/functional/function_ref.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
@@ -55,6 +57,7 @@
 #include "chrome/browser/tab_list/tab_list_interface.h"
 #include "chrome/browser/tab_list/tab_list_interface_observer.h"
 #include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
@@ -74,9 +77,16 @@
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/input/native_web_keyboard_event.h"
+#include "components/javascript_dialogs/app_modal_dialog_controller.h"
+#include "components/javascript_dialogs/app_modal_dialog_queue.h"
+#include "components/javascript_dialogs/app_modal_dialog_view.h"
+#include "components/javascript_dialogs/tab_modal_dialog_manager.h"
 #include "components/sessions/content/session_tab_helper.h"
 #include "components/tabs/public/split_tab_data.h"
 #include "components/tabs/public/tab_interface.h"
+#include "components/web_modal/web_contents_modal_dialog_host.h"
+#include "components/web_modal/web_contents_modal_dialog_manager.h"
+#include "components/web_modal/web_contents_modal_dialog_manager_delegate.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_widget_host.h"
@@ -498,6 +508,50 @@ std::string ProductIdentifierForTab(Browser* target_browser,
       controller->SerializeTabForSession(tab->GetHandle());
   CHECK(serialized);
   return ReadWorkspaceTabSessionData(*serialized).first;
+}
+
+bool CreateNativeSplitThroughRail(views::View* rail,
+                                  Browser* target_browser,
+                                  tabs::TabInterface* first,
+                                  tabs::TabInterface* second) {
+  CHECK(rail);
+  CHECK(target_browser);
+  CHECK(first);
+  CHECK(second);
+  const std::string first_identifier =
+      ProductIdentifierForTab(target_browser, first);
+  const std::string second_identifier =
+      ProductIdentifierForTab(target_browser, second);
+  const std::string menu_identifier = "limitless-tab-split-" + first_identifier;
+  const auto action = limitless::PerformSwiftUIAccessibilityMenuItemForTesting(
+      rail, menu_identifier, menu_identifier + "-with-" + second_identifier);
+  return action && action->press_invoked && WaitForCondition([&]() {
+           if (!first->GetSplit().has_value() ||
+               first->GetSplit() != second->GetSplit()) {
+             return false;
+           }
+           const auto snapshot =
+               limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+           if (!snapshot) {
+             return false;
+           }
+           for (size_t index = 0;
+                index < snapshot->split_first_tab_identifiers.size() &&
+                index < snapshot->split_second_tab_identifiers.size();
+                ++index) {
+             const std::string& projected_first =
+                 snapshot->split_first_tab_identifiers[index];
+             const std::string& projected_second =
+                 snapshot->split_second_tab_identifiers[index];
+             if ((projected_first == first_identifier &&
+                  projected_second == second_identifier) ||
+                 (projected_first == second_identifier &&
+                  projected_second == first_identifier)) {
+               return true;
+             }
+           }
+           return false;
+         });
 }
 
 tabs::TabInterface* FindTabWithProductIdentifier(
@@ -1360,6 +1414,315 @@ IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
   }));
   EXPECT_EQ(one_contents, one->GetContents());
   EXPECT_EQ("one", content::EvalJs(one_contents, "limitlessSplitState"));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    SplitBeforeUnloadCancelOrAcceptKeepsExactPaneAndFocusAuthoritative) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/one")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/two"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  ASSERT_EQ(2, tab_strip->count());
+  tabs::TabInterface* one = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* two = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(one);
+  ASSERT_TRUE(two);
+  content::WebContents* one_contents = one->GetContents();
+  content::WebContents* two_contents = two->GetContents();
+  ASSERT_TRUE(content::ExecJs(one_contents, R"JS(
+        const input = document.createElement('input');
+        input.id = 'limitless-prompt-input';
+        document.body.appendChild(input);
+      )JS"));
+  ASSERT_TRUE(content::ExecJs(two_contents, R"JS(
+        const input = document.createElement('input');
+        input.id = 'limitless-prompt-input';
+        document.body.appendChild(input);
+        window.onbeforeunload = event => {
+          event.preventDefault();
+          event.returnValue = '';
+        };
+      )JS"));
+
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(WaitForRailTabs(rail, 2));
+  ASSERT_TRUE(CreateNativeSplitThroughRail(rail, browser(), one, two));
+  const split_tabs::SplitTabId split_id = *one->GetSplit();
+  const tabs::TabHandle one_handle = one->GetHandle();
+  const tabs::TabHandle two_handle = two->GetHandle();
+  const std::string two_row_identifier =
+      "limitless-tab-" + std::to_string(two_handle.raw_value());
+  const std::string close_two_identifier =
+      "limitless-tab-close-" + std::to_string(two_handle.raw_value());
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, two_row_identifier,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* renderer_view =
+        two_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == two && renderer_view &&
+           renderer_view->HasFocus();
+  }));
+  ASSERT_TRUE(content::ExecJs(
+      two_contents,
+      "document.querySelector('#limitless-prompt-input').focus()"));
+
+  content::PrepContentsForBeforeUnloadTest(two_contents);
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, close_two_identifier,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  javascript_dialogs::AppModalDialogController* prompt =
+      ui_test_utils::WaitForAppModalDialog();
+  base::ScopedClosureRunner prompt_cleanup(base::BindOnce([]() {
+    javascript_dialogs::AppModalDialogQueue* queue =
+        javascript_dialogs::AppModalDialogQueue::GetInstance();
+    if (queue->HasActiveDialog()) {
+      queue->active_dialog()->view()->CancelAppModalDialog();
+    }
+  }));
+  ASSERT_TRUE(prompt);
+  ASSERT_TRUE(prompt->IsValid());
+  EXPECT_TRUE(prompt->is_before_unload_dialog());
+  EXPECT_EQ(two_contents, prompt->web_contents());
+  EXPECT_EQ(two, tab_strip->GetActiveTab());
+  EXPECT_EQ(split_id, one->GetSplit());
+  EXPECT_EQ(split_id, two->GetSplit());
+  const auto prompted_snapshot =
+      limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+  ASSERT_TRUE(prompted_snapshot);
+  EXPECT_EQ(1u, prompted_snapshot->split_pair_identifiers.size());
+
+  prompt->view()->CancelAppModalDialog();
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* renderer_view =
+        two_contents->GetRenderWidgetHostView();
+    return one_handle.Get() == one && two_handle.Get() == two &&
+           tab_strip->GetActiveTab() == two && renderer_view &&
+           renderer_view->HasFocus();
+  }));
+  std::ignore = prompt_cleanup.Release();
+  EXPECT_EQ(split_id, one->GetSplit());
+  EXPECT_EQ(split_id, two->GetSplit());
+  SendRendererKey(browser(), ui::VKEY_C, ui::EF_NONE, u'c');
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return content::EvalJs(
+               two_contents,
+               "document.querySelector('#limitless-prompt-input').value") ==
+           "c";
+  }));
+  EXPECT_EQ("", content::EvalJs(
+                    one_contents,
+                    "document.querySelector('#limitless-prompt-input').value"));
+
+  content::PrepContentsForBeforeUnloadTest(two_contents);
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, close_two_identifier,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  prompt = ui_test_utils::WaitForAppModalDialog();
+  base::ScopedClosureRunner accept_prompt_cleanup(base::BindOnce([]() {
+    javascript_dialogs::AppModalDialogQueue* queue =
+        javascript_dialogs::AppModalDialogQueue::GetInstance();
+    if (queue->HasActiveDialog()) {
+      queue->active_dialog()->view()->CancelAppModalDialog();
+    }
+  }));
+  ASSERT_TRUE(prompt);
+  ASSERT_TRUE(prompt->IsValid());
+  EXPECT_TRUE(prompt->is_before_unload_dialog());
+  EXPECT_EQ(two_contents, prompt->web_contents());
+  prompt->view()->AcceptAppModalDialog();
+
+  std::optional<limitless::SwiftUITabRailSnapshotForTesting> final_snapshot;
+  ASSERT_TRUE(WaitForCondition([&]() {
+    final_snapshot = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    content::RenderWidgetHostView* renderer_view =
+        one_contents->GetRenderWidgetHostView();
+    return two_handle.Get() == nullptr && one_handle.Get() == one &&
+           tab_strip->count() == 1 && tab_strip->GetActiveTab() == one &&
+           !one->IsSplit() && final_snapshot &&
+           final_snapshot->split_pair_identifiers.empty() && renderer_view &&
+           renderer_view->HasFocus();
+  }));
+  std::ignore = accept_prompt_cleanup.Release();
+  ASSERT_TRUE(content::ExecJs(
+      one_contents,
+      "document.querySelector('#limitless-prompt-input').focus()"));
+  SendRendererKey(browser(), ui::VKEY_A, ui::EF_NONE, u'a');
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return content::EvalJs(
+               one_contents,
+               "document.querySelector('#limitless-prompt-input').value") ==
+           "a";
+  }));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    SplitJavaScriptPromptUsesExactPaneHostAndRetainsNativeFocusRoute) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/one")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/two"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  tabs::TabInterface* one = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* two = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(one);
+  ASSERT_TRUE(two);
+  content::WebContents* one_contents = one->GetContents();
+  content::WebContents* two_contents = two->GetContents();
+  ASSERT_TRUE(content::ExecJs(one_contents, R"JS(
+        const input = document.createElement('input');
+        input.id = 'limitless-dialog-input';
+        document.body.appendChild(input);
+      )JS"));
+  ASSERT_TRUE(content::ExecJs(two_contents, R"JS(
+        const input = document.createElement('input');
+        input.id = 'limitless-dialog-input';
+        document.body.appendChild(input);
+      )JS"));
+
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(WaitForRailTabs(rail, 2));
+  ASSERT_TRUE(CreateNativeSplitThroughRail(rail, browser(), one, two));
+  const split_tabs::SplitTabId split_id = *one->GetSplit();
+  const std::string first_identifier = ProductIdentifierForTab(browser(), one);
+  const std::string second_identifier = ProductIdentifierForTab(browser(), two);
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, "limitless-tab-" + std::to_string(one->GetHandle().raw_value()),
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == one; }));
+  ASSERT_TRUE(ui_test_utils::BringBrowserWindowToFront(browser()));
+
+  BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser());
+  ASSERT_TRUE(browser_view);
+  web_modal::WebContentsModalDialogHost* first_host =
+      browser_view->GetWebContentsModalDialogHostFor(one_contents);
+  web_modal::WebContentsModalDialogHost* second_host =
+      browser_view->GetWebContentsModalDialogHostFor(two_contents);
+  ASSERT_TRUE(first_host);
+  ASSERT_TRUE(second_host);
+  EXPECT_NE(first_host, second_host);
+  const gfx::Size representative_dialog_size(120, 80);
+  const gfx::Point first_position =
+      first_host->GetDialogPosition(representative_dialog_size);
+  const gfx::Point second_position =
+      second_host->GetDialogPosition(representative_dialog_size);
+  EXPECT_LT(first_position.x(), second_position.x());
+
+  auto* first_modal_manager =
+      web_modal::WebContentsModalDialogManager::FromWebContents(one_contents);
+  auto* second_modal_manager =
+      web_modal::WebContentsModalDialogManager::FromWebContents(two_contents);
+  auto* prompt_manager =
+      javascript_dialogs::TabModalDialogManager::FromWebContents(two_contents);
+  ASSERT_TRUE(first_modal_manager);
+  ASSERT_TRUE(second_modal_manager);
+  ASSERT_TRUE(prompt_manager);
+  base::ScopedClosureRunner prompt_cleanup(base::BindOnce(
+      [](javascript_dialogs::TabModalDialogManager* manager,
+         content::WebContents* contents) {
+        if (manager->IsShowingDialogForTesting()) {
+          manager->CancelDialogs(contents, /*reset_state=*/false);
+        }
+      },
+      prompt_manager, two_contents));
+  two_contents->GetPrimaryMainFrame()->ExecuteJavaScriptWithUserGestureForTests(
+      u"window.limitlessPromptResult = 'pending';"
+      u"window.limitlessPromptResult = window.prompt('Pane prompt', '') ?? "
+      u"'cancelled';"
+      u"document.querySelector('#limitless-dialog-input').focus();",
+      base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return prompt_manager->IsShowingDialogForTesting(); }));
+  EXPECT_FALSE(first_modal_manager->IsDialogActive());
+  EXPECT_TRUE(second_modal_manager->IsDialogActive());
+  ASSERT_TRUE(first_modal_manager->delegate());
+  ASSERT_TRUE(second_modal_manager->delegate());
+  EXPECT_EQ(first_host,
+            first_modal_manager->delegate()->GetWebContentsModalDialogHost(
+                one_contents));
+  EXPECT_EQ(second_host,
+            second_modal_manager->delegate()->GetWebContentsModalDialogHost(
+                two_contents));
+  EXPECT_EQ(one, tab_strip->GetActiveTab());
+  EXPECT_EQ(split_id, one->GetSplit());
+  EXPECT_EQ(split_id, two->GetSplit());
+
+  NSWindow* browser_window =
+      browser()->GetWindow()->GetNativeWindow().GetNativeNSWindow();
+  ASSERT_TRUE(browser_window);
+  NSWindow* prompt_window = NSApp.keyWindow;
+  ASSERT_TRUE(prompt_window);
+  EXPECT_NE(browser_window, prompt_window);
+  EXPECT_TRUE(prompt_window.parentWindow == browser_window ||
+              [browser_window.childWindows containsObject:prompt_window]);
+
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, "limitless-tab-" + std::to_string(two->GetHandle().raw_value()),
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return tab_strip->GetActiveTab() == two; }));
+  EXPECT_TRUE(prompt_manager->IsShowingDialogForTesting());
+  EXPECT_TRUE(second_modal_manager->IsDialogActive());
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return NSApp.keyWindow == prompt_window; }));
+  std::optional<limitless::SwiftUITabRailSnapshotForTesting> focused_snapshot;
+  ASSERT_TRUE(WaitForCondition([&]() {
+    focused_snapshot = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    return focused_snapshot && focused_snapshot->split_active_tab_identifiers ==
+                                   std::vector<std::string>{second_identifier};
+  }));
+  ASSERT_TRUE(focused_snapshot);
+  EXPECT_EQ(std::vector<std::string>{first_identifier},
+            focused_snapshot->split_first_tab_identifiers);
+  EXPECT_EQ(std::vector<std::string>{second_identifier},
+            focused_snapshot->split_second_tab_identifiers);
+  EXPECT_EQ(std::vector<std::string>{second_identifier},
+            focused_snapshot->split_active_tab_identifiers);
+
+  const std::u16string prompt_answer = u"pane answer";
+  ASSERT_TRUE(prompt_manager->HandleJavaScriptDialog(two_contents,
+                                                     /*accept=*/true,
+                                                     &prompt_answer));
+  EXPECT_FALSE(prompt_manager->IsShowingDialogForTesting());
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return !second_modal_manager->IsDialogActive(); }));
+  EXPECT_EQ("pane answer",
+            content::EvalJs(two_contents, "window.limitlessPromptResult"));
+  std::ignore = prompt_cleanup.Release();
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, "limitless-tab-" + std::to_string(two->GetHandle().raw_value()),
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* renderer_view =
+        two_contents->GetRenderWidgetHostView();
+    return renderer_view && renderer_view->HasFocus();
+  }));
+  SendRendererKey(browser(), ui::VKEY_P, ui::EF_NONE, u'p');
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return content::EvalJs(
+               two_contents,
+               "document.querySelector('#limitless-dialog-input').value") ==
+           "p";
+  }));
+  EXPECT_EQ("", content::EvalJs(
+                    one_contents,
+                    "document.querySelector('#limitless-dialog-input').value"));
+  EXPECT_EQ(split_id, one->GetSplit());
+  EXPECT_EQ(split_id, two->GetSplit());
+  EXPECT_EQ(one_contents, one->GetContents());
+  EXPECT_EQ(two_contents, two->GetContents());
 }
 
 IN_PROC_BROWSER_TEST_F(

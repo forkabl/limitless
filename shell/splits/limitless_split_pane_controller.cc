@@ -340,21 +340,57 @@ SplitPaneOperationResult SplitPaneController::FocusPane(
     return {.status = SplitPaneOperationStatus::kPairChanged};
   }
 
+  base::WeakPtr<SplitPaneController> alive = weak_ptr_factory_.GetWeakPtr();
+  BrowserFocusController* preflight_focus_controller =
+      alive->focus_controller_resolver_
+          ? alive->focus_controller_resolver_.Run()
+          : BrowserFocusController::From(alive->browser_window_);
+  if (!alive) {
+    return {.status = SplitPaneOperationStatus::kWindowUnavailable};
+  }
+  if (!preflight_focus_controller) {
+    return {.status = SplitPaneOperationStatus::kFocusUnavailable};
+  }
+  WorkspaceController* workspace =
+      WorkspaceController::From(alive->browser_window_);
+  if (!workspace) {
+    return {.status = SplitPaneOperationStatus::kTabUnavailable};
+  }
+  const WorkspaceOperationResult activation =
+      workspace->ActivateTabByIdentifier(pair.window_identifier,
+                                         member_tab_identifier);
+  if (!alive) {
+    return {.status = SplitPaneOperationStatus::kWindowUnavailable};
+  }
+  if (!activation.succeeded()) {
+    return {.status = SplitPaneOperationStatus::kTabUnavailable};
+  }
+  const SplitPaneOperationStatus revalidated_status =
+      alive->ResolvePair(pair, &first, &second);
+  if (revalidated_status != SplitPaneOperationStatus::kSuccess) {
+    return {.status = revalidated_status};
+  }
+  tabs::TabInterface* activated_member =
+      member_tab_identifier == pair.first_tab_identifier ? first.Get()
+                                                         : second.Get();
+  if (!activated_member ||
+      alive->tab_list_->GetActiveTab() != activated_member) {
+    return {.status = SplitPaneOperationStatus::kPairChanged};
+  }
   BrowserFocusController* focus_controller =
-      focus_controller_resolver_
-          ? focus_controller_resolver_.Run()
-          : BrowserFocusController::From(browser_window_);
+      alive->focus_controller_resolver_
+          ? alive->focus_controller_resolver_.Run()
+          : BrowserFocusController::From(alive->browser_window_);
+  if (!alive) {
+    return {.status = SplitPaneOperationStatus::kWindowUnavailable};
+  }
   if (!focus_controller) {
     return {.status = SplitPaneOperationStatus::kFocusUnavailable};
   }
-  WorkspaceController* workspace = WorkspaceController::From(browser_window_);
-  if (!workspace || !workspace
-                         ->ActivateTabByIdentifier(pair.window_identifier,
-                                                   member_tab_identifier)
-                         .succeeded()) {
-    return {.status = SplitPaneOperationStatus::kTabUnavailable};
-  }
   focus_controller->FocusWebContentsPane();
+  if (!alive) {
+    return {.status = SplitPaneOperationStatus::kWindowUnavailable};
+  }
   return SuccessForPair(pair);
 }
 
@@ -736,14 +772,22 @@ void SplitPaneController::ReconcileAndPublish(uint64_t generation) {
       workspace) {
     reconciling_ = true;
     base::WeakPtr<SplitPaneController> alive = weak_ptr_factory_.GetWeakPtr();
+    base::WeakPtr<WorkspaceController> workspace_alive =
+        workspace->GetWeakPtr();
     for (const split_tabs::SplitTabId split_id :
          tab_strip_model_->ListSplits()) {
+      if (!workspace_alive) {
+        break;
+      }
       const split_tabs::SplitTabData* split_data =
           tab_strip_model_->GetSplitData(split_id);
       if (!split_data) {
         tab_list_->Unsplit(split_id);
         if (!alive) {
           return;
+        }
+        if (!workspace_alive) {
+          break;
         }
         continue;
       }
@@ -753,6 +797,9 @@ void SplitPaneController::ReconcileAndPublish(uint64_t generation) {
         if (!alive) {
           return;
         }
+        if (!workspace_alive) {
+          break;
+        }
         continue;
       }
       const bool exact_window_and_profile =
@@ -761,14 +808,19 @@ void SplitPaneController::ReconcileAndPublish(uint64_t generation) {
           members[0]->GetProfile() == browser_window_->GetProfile() &&
           members[1]->GetProfile() == browser_window_->GetProfile();
       const std::optional<std::string> first_workspace =
-          workspace->GetWorkspaceIdentifierForTab(members[0]->GetHandle());
+          workspace_alive->GetWorkspaceIdentifierForTab(
+              members[0]->GetHandle());
       const std::optional<std::string> second_workspace =
-          workspace->GetWorkspaceIdentifierForTab(members[1]->GetHandle());
+          workspace_alive->GetWorkspaceIdentifierForTab(
+              members[1]->GetHandle());
       if (!exact_window_and_profile || !first_workspace || !second_workspace ||
           first_workspace != second_workspace) {
         tab_list_->Unsplit(split_id);
         if (!alive) {
           return;
+        }
+        if (!workspace_alive) {
+          break;
         }
       }
     }
