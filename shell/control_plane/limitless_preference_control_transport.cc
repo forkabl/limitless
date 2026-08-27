@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -322,7 +323,8 @@ void PreferenceControlTransport::AcceptLoop(
         base::BindOnce(&PreferenceControlTransport::HandleRequestOnOrigin,
                        origin_weak_ptr, std::move(payload), pending));
     std::unique_lock lock(pending->mutex);
-    if (!pending->ready.wait_for(lock, kTransportIoTimeout.ToChrono(),
+    if (!pending->ready.wait_for(
+            lock, std::chrono::milliseconds(kTransportIoTimeout.InMilliseconds()),
                                  [&pending] { return pending->response; })) {
       continue;
     }
