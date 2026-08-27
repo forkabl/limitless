@@ -302,13 +302,33 @@ random CDP port. The strict gate requires:
 - `Browser.close`, process exit status zero, disappearance of the exact native
   window, and no singleton profile locks.
 
-The contract suite passes 13 of 13 cases. Once a CDP connection exists, every
+The contract suite passes 19 of 19 cases. Once a CDP connection exists, every
 validation failure and interrupt still requests `Browser.close`, and a failed
 close request is reported alongside the primary failure. The launcher gives
 readiness, CDP, and the native probe one shared validation deadline, always
 reaps the launched child, and records its exit status. Endpoint failures before
 a CDP connection use the launcher's bounded process cleanup because no protocol
 session exists through which to request `Browser.close`.
+
+The Retina validator resolves the exact display containing the whole native
+window, reads its current display mode, and accepts only normalized 1x or 2x
+backing scales. PNG dimensions must lie inside the strict floor-to-ceiling
+quantization envelope for the whole point-sized window and inside the matching
+aspect-ratio envelope. The probe revalidates exact CoreGraphics and CDP window
+identity and bounds around capture. Deterministic contract cases cover 1x, 2x,
+fractional point bounds, wrong and unsupported scales, transparent output, and
+post-capture window movement.
+
+On 2026-08-27 the corrected real-app run resolved the exact Limitless PID and
+window, exercised external AX focus, measured a 1200 by 1366 point window at 2x,
+captured a correctly bounded 2400 by 2732 PNG, requested `Browser.close`, and
+observed exit status zero. Visual inspection and direct PNG decoding found that
+every captured pixel had zero alpha, so the validator rejected the bitmap as
+fully transparent. Direct exact-window `screencapture` controls with and without
+window shadow produced the same transparent result. Retina point-to-pixel
+geometry and the CDP lifecycle are therefore green, while exact-window pixel
+acceptance remains an external red gate because this session did not produce a
+visible bitmap.
 
 The current hardened real-app run is red because this execution session has no
 usable interactive macOS accessibility or screen-capture channel. Limitless had

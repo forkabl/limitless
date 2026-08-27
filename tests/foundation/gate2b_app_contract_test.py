@@ -40,12 +40,19 @@ def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     )
 
 
-PNG_BYTES = (
-    b"\x89PNG\r\n\x1a\n"
-    + png_chunk(b"IHDR", struct.pack("!IIBBBBB", 2, 1, 8, 6, 0, 0, 0))
-    + png_chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00\xff\x00\xff\x00\xff"))
-    + png_chunk(b"IEND", b"")
-)
+def png_bytes(width: int, height: int, *, alpha: int = 255) -> bytes:
+    row = b"\x00" + bytes((0, 0, 0, alpha)) * width
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(
+            b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 6, 0, 0, 0)
+        )
+        + png_chunk(b"IDAT", zlib.compress(row * height))
+        + png_chunk(b"IEND", b"")
+    )
+
+
+PNG_BYTES = png_bytes(2, 1)
 
 
 class FakeCdpClient:
@@ -176,6 +183,154 @@ class Gate2BAppContractTest(unittest.TestCase):
         self.assertFalse(native["native_keyboard_input"])
         self.assertEqual(2, native["native_window_screenshot_width"])
         self.assertEqual(1, native["native_window_screenshot_height"])
+
+    def test_native_screenshot_validation_accepts_1x_and_2x_backing_scales(
+        self,
+    ) -> None:
+        bounds = {
+            "left": 10,
+            "top": 20,
+            "width": 120,
+            "height": 80,
+            "windowState": "normal",
+        }
+        native_bounds = {"x": 10, "y": 20, "width": 120, "height": 80}
+        for scale in (1.0, 2.0):
+            with self.subTest(scale=scale):
+                client = FakeCdpClient(bounds=bounds)
+                result = validate(
+                    client,
+                    probe_overrides={
+                        "display_scale": scale,
+                        "window_bounds": native_bounds,
+                    },
+                    screenshot_bytes=png_bytes(
+                        round(native_bounds["width"] * scale),
+                        round(native_bounds["height"] * scale),
+                    ),
+                )
+
+                native = result["native_boundary"]
+                self.assertEqual(
+                    round(120 * scale), native["native_window_screenshot_width"]
+                )
+                self.assertEqual(
+                    round(80 * scale), native["native_window_screenshot_height"]
+                )
+                self.assertEqual("Browser.close", client.commands[-1])
+
+    def test_native_screenshot_validation_rejects_wrong_backing_scale(self) -> None:
+        client = FakeCdpClient(
+            bounds={
+                "left": 10,
+                "top": 20,
+                "width": 120,
+                "height": 80,
+                "windowState": "normal",
+            }
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "dimensions do not match the whole native window"
+        ):
+            validate(
+                client,
+                probe_overrides={
+                    "display_scale": 1.0,
+                    "window_bounds": {
+                        "x": 10,
+                        "y": 20,
+                        "width": 120,
+                        "height": 80,
+                    },
+                },
+                screenshot_bytes=png_bytes(240, 160),
+            )
+        self.assertEqual("Browser.close", client.commands[-1])
+
+    def test_native_screenshot_validation_rejects_transparent_capture(self) -> None:
+        client = FakeCdpClient()
+        with self.assertRaisesRegex(RuntimeError, "fully transparent"):
+            validate(client, screenshot_bytes=png_bytes(2, 1, alpha=0))
+        self.assertEqual("Browser.close", client.commands[-1])
+
+    def test_fractional_native_bounds_allow_only_scale_quantization(self) -> None:
+        bounds = {
+            "left": 10,
+            "top": 20,
+            "width": 120.25,
+            "height": 80.25,
+            "windowState": "normal",
+        }
+        native_bounds = {"x": 10, "y": 20, "width": 120.25, "height": 80.25}
+        client = FakeCdpClient(bounds=bounds)
+        result = validate(
+            client,
+            probe_overrides={
+                "display_scale": 2.0,
+                "window_bounds": native_bounds,
+            },
+            screenshot_bytes=png_bytes(241, 160),
+        )
+        native = result["native_boundary"]
+        self.assertEqual(241, native["native_window_screenshot_width"])
+        self.assertEqual(160, native["native_window_screenshot_height"])
+        self.assertLessEqual(
+            native["native_window_screenshot_aspect_min"], 241 / 160
+        )
+        self.assertGreaterEqual(
+            native["native_window_screenshot_aspect_max"], 241 / 160
+        )
+
+        for width, height in ((242, 160), (160, 241)):
+            with self.subTest(width=width, height=height):
+                client = FakeCdpClient(bounds=bounds)
+                with self.assertRaisesRegex(
+                    RuntimeError, "dimensions do not match the whole native window"
+                ):
+                    validate(
+                        client,
+                        probe_overrides={
+                            "display_scale": 2.0,
+                            "window_bounds": native_bounds,
+                        },
+                        screenshot_bytes=png_bytes(width, height),
+                    )
+                self.assertEqual("Browser.close", client.commands[-1])
+
+    def test_native_screenshot_validation_rejects_unsupported_scale(self) -> None:
+        client = FakeCdpClient()
+        with self.assertRaisesRegex(RuntimeError, "unsupported display scale"):
+            validate(client, probe_overrides={"display_scale": 1.5})
+        self.assertEqual("Browser.close", client.commands[-1])
+
+    def test_post_capture_cdp_window_change_fails_closed(self) -> None:
+        class MovingWindowClient(FakeCdpClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.window_lookups = 0
+
+            def call(
+                self,
+                method: str,
+                params: dict[str, Any] | None = None,
+                *,
+                deadline: float,
+            ) -> dict[str, Any]:
+                result = super().call(method, params, deadline=deadline)
+                if method == "Browser.getWindowForTarget":
+                    self.window_lookups += 1
+                    if self.window_lookups == 2:
+                        return {
+                            "windowId": result["windowId"],
+                            "bounds": {**result["bounds"], "left": 40},
+                        }
+                return result
+
+        client = MovingWindowClient()
+        with self.assertRaisesRegex(RuntimeError, "left changed during capture"):
+            validate(client)
+        self.assertEqual(2, client.window_lookups)
+        self.assertEqual("Browser.close", client.commands[-1])
 
     def test_webui_browser_target_is_rejected_and_browser_still_closes(self) -> None:
         client = FakeCdpClient(
@@ -403,6 +558,10 @@ printf 'reaped=%s\nstatus=%s\nafter_wait_state=%s\n' \
             "kAXFocusedAttribute",
             '"/usr/sbin/screencapture"',
             '"-l\\(window.identifier)"',
+            '"-a"',
+            '"-t", "png"',
+            "CGDisplayCopyDisplayMode",
+            "pixelWidth",
             "process.terminate()",
             "Darwin.kill(process.processIdentifier, SIGKILL)",
         ):

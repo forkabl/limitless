@@ -38,6 +38,12 @@ private struct BoundaryElements {
   let window: AXUIElement
 }
 
+private struct DisplayEvidence {
+  let bounds: CGRect
+  let identifier: CGDirectDisplayID
+  let scale: CGFloat
+}
+
 private func parsePositiveInteger(_ value: String, flag: String) throws -> Int {
   guard let parsed = Int(value), parsed > 0 else {
     throw ProbeFailure(description: "\(flag) must be a positive integer")
@@ -383,7 +389,7 @@ private func focusedElement(of application: AXUIElement) -> AXUIElement? {
   return axElement(from: copyAttribute(application, kAXFocusedUIElementAttribute))
 }
 
-private func displayScale(for windowBounds: CGRect) throws -> CGFloat {
+private func displayEvidence(for windowBounds: CGRect) throws -> DisplayEvidence {
   var displayCount: UInt32 = 0
   guard CGGetActiveDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
     throw ProbeFailure(description: "could not enumerate active displays")
@@ -394,24 +400,42 @@ private func displayScale(for windowBounds: CGRect) throws -> CGFloat {
   else {
     throw ProbeFailure(description: "could not read active display identifiers")
   }
-  let bestDisplay = displays.max { left, right in
-    let leftArea = CGDisplayBounds(left).intersection(windowBounds).area
-    let rightArea = CGDisplayBounds(right).intersection(windowBounds).area
-    return leftArea < rightArea
+  let epsilon: CGFloat = 0.5
+  let containingDisplays = displays.filter { display in
+    let bounds = CGDisplayBounds(display)
+    return windowBounds.minX >= bounds.minX - epsilon
+      && windowBounds.minY >= bounds.minY - epsilon
+      && windowBounds.maxX <= bounds.maxX + epsilon
+      && windowBounds.maxY <= bounds.maxY + epsilon
   }
-  guard let bestDisplay else {
-    throw ProbeFailure(description: "could not match the native window to a display")
+  guard containingDisplays.count == 1, let matchedDisplay = containingDisplays.first else {
+    throw ProbeFailure(
+      description: "native window did not belong to exactly one active display"
+    )
   }
-  let displayBounds = CGDisplayBounds(bestDisplay)
-  guard displayBounds.width > 0, displayBounds.height > 0 else {
-    throw ProbeFailure(description: "matched display had invalid bounds")
+  guard let displayMode = CGDisplayCopyDisplayMode(matchedDisplay) else {
+    throw ProbeFailure(description: "could not read the matched display mode")
   }
-  let horizontalScale = CGFloat(CGDisplayPixelsWide(bestDisplay)) / displayBounds.width
-  let verticalScale = CGFloat(CGDisplayPixelsHigh(bestDisplay)) / displayBounds.height
+  let pointWidth = CGFloat(displayMode.width)
+  let pointHeight = CGFloat(displayMode.height)
+  guard pointWidth > 0, pointHeight > 0 else {
+    throw ProbeFailure(description: "matched display mode had invalid point dimensions")
+  }
+  let horizontalScale = CGFloat(displayMode.pixelWidth) / pointWidth
+  let verticalScale = CGFloat(displayMode.pixelHeight) / pointHeight
   guard abs(horizontalScale - verticalScale) < 0.01, horizontalScale > 0 else {
     throw ProbeFailure(description: "matched display reported inconsistent scaling")
   }
-  return horizontalScale
+  guard let normalizedScale = [CGFloat(1), CGFloat(2)].first(where: {
+    abs(horizontalScale - $0) < 0.01
+  }) else {
+    throw ProbeFailure(description: "matched display reported an unsupported backing scale")
+  }
+  return DisplayEvidence(
+    bounds: CGDisplayBounds(matchedDisplay),
+    identifier: matchedDisplay,
+    scale: normalizedScale
+  )
 }
 
 extension CGRect {
@@ -433,14 +457,15 @@ private func waitForExit(_ process: Process, until deadline: Date) -> Bool {
 private func captureWindow(
   _ window: NativeWindow, to screenshot: URL, deadline: Date
 ) throws {
-  if FileManager.default.fileExists(atPath: screenshot.path) {
+  var existingStatus = stat()
+  if lstat(screenshot.path, &existingStatus) == 0 || errno != ENOENT {
     throw ProbeFailure(description: "native screenshot path already exists: \(screenshot.path)")
   }
   let process = Process()
   let stderr = Pipe()
   process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
   process.arguments = [
-    "-x", "-o", "-l\(window.identifier)", screenshot.path,
+    "-x", "-o", "-a", "-t", "png", "-l\(window.identifier)", screenshot.path,
   ]
   process.standardError = stderr
   try process.run()
@@ -471,10 +496,24 @@ private func captureWindow(
       description: "screencapture failed with status \(process.terminationStatus): \(detail)"
     )
   }
-  let attributes = try FileManager.default.attributesOfItem(atPath: screenshot.path)
-  guard let size = attributes[.size] as? NSNumber, size.intValue > 0 else {
-    throw ProbeFailure(description: "screencapture produced an empty native window PNG")
+  var screenshotStatus = stat()
+  guard
+    lstat(screenshot.path, &screenshotStatus) == 0,
+    screenshotStatus.st_mode & S_IFMT == S_IFREG,
+    screenshotStatus.st_size > 0
+  else {
+    throw ProbeFailure(
+      description: "screencapture did not produce one nonempty regular PNG file"
+    )
   }
+}
+
+private func approximatelyEqual(_ left: CGRect, _ right: CGRect) -> Bool {
+  let epsilon: CGFloat = 0.5
+  return abs(left.minX - right.minX) <= epsilon
+    && abs(left.minY - right.minY) <= epsilon
+    && abs(left.width - right.width) <= epsilon
+    && abs(left.height - right.height) <= epsilon
 }
 
 private func waitForBoundary(
@@ -578,8 +617,26 @@ private func verifyAndCapture(_ arguments: Arguments) throws -> [String: Any] {
     pid: arguments.pid,
     deadline: deadline
   )
-  let scale = try displayScale(for: window.bounds)
-  try captureWindow(window, to: screenshot, deadline: deadline)
+  let beforeCaptureWindows = try nativeWindows(ownerPID: arguments.pid).filter {
+    $0.identifier == window.identifier
+  }
+  guard beforeCaptureWindows.count == 1,
+    let beforeCaptureWindow = beforeCaptureWindows.first,
+    approximatelyEqual(beforeCaptureWindow.bounds, window.bounds)
+  else {
+    throw ProbeFailure(description: "native window bounds changed before capture")
+  }
+  let display = try displayEvidence(for: beforeCaptureWindow.bounds)
+  try captureWindow(beforeCaptureWindow, to: screenshot, deadline: deadline)
+  let afterCaptureWindows = try nativeWindows(ownerPID: arguments.pid).filter {
+    $0.identifier == window.identifier
+  }
+  guard afterCaptureWindows.count == 1,
+    let afterCaptureWindow = afterCaptureWindows.first,
+    approximatelyEqual(afterCaptureWindow.bounds, beforeCaptureWindow.bounds)
+  else {
+    throw ProbeFailure(description: "native window bounds changed during capture")
+  }
   guard
     let focusIdentifier = stringAttribute(boundary.focus, kAXIdentifierAttribute),
     isTabRowIdentifier(focusIdentifier)
@@ -590,7 +647,14 @@ private func verifyAndCapture(_ arguments: Arguments) throws -> [String: Any] {
     "accessibility_permission": true,
     "ax_window_count": 1,
     "cg_window_id": Int(window.identifier),
-    "display_scale": Double(scale),
+    "display_bounds": [
+      "height": Double(display.bounds.height),
+      "width": Double(display.bounds.width),
+      "x": Double(display.bounds.minX),
+      "y": Double(display.bounds.minY),
+    ],
+    "display_id": Int(display.identifier),
+    "display_scale": Double(display.scale),
     "focus_identifier": focusIdentifier,
     "focus_method": "macos-accessibility-AXFocused",
     "focus_parent_reaches_window": true,
@@ -605,10 +669,10 @@ private func verifyAndCapture(_ arguments: Arguments) throws -> [String: Any] {
     "screenshot": screenshot.path,
     "screenshot_method": "screencapture-window-id",
     "window_bounds": [
-      "height": Double(window.bounds.height),
-      "width": Double(window.bounds.width),
-      "x": Double(window.bounds.minX),
-      "y": Double(window.bounds.minY),
+      "height": Double(beforeCaptureWindow.bounds.height),
+      "width": Double(beforeCaptureWindow.bounds.width),
+      "x": Double(beforeCaptureWindow.bounds.minX),
+      "y": Double(beforeCaptureWindow.bounds.minY),
     ],
     "window_title": window.title,
   ]
