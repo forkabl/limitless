@@ -33,12 +33,14 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/tab_list/tab_list_interface.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "components/prefs/pref_service.h"
 #include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "shell/agents/agent_presence_registry.h"
+#include "shell/control_plane/limitless_profile_preference_backend.h"
 #include "shell/shortcuts/limitless_command_dispatcher_delegate_mac.h"
 #include "shell/shortcuts/limitless_leader_shortcut_controller.h"
 #include "shell/splits/limitless_split_pane_controller.h"
@@ -382,6 +384,17 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
                      base::SysNSStringToUTF8(first_tab_identifier),
                      base::SysNSStringToUTF8(second_tab_identifier));
         }];
+    Profile* profile = browser_window_->GetProfile();
+    if (!profile->IsOffTheRecord() && profile->GetPrefs() &&
+        profile->GetPrefs()->FindPreference(kRailDensityPreference)) {
+      preference_backend_ =
+          std::make_unique<ProfilePreferenceControlBackend>(
+              profile,
+              base::BindRepeating(&SwiftUITabRailHost::OnRailDensityChanged,
+                                  weak_this));
+      OnRailDensityChanged(preference_backend_->GetEffectiveValue(
+          PreferenceKey::kRailDensity));
+    }
     workspace_controller_ = std::make_unique<WorkspaceController>(
         browser_window_,
         CreateWorkspaceSessionPersistence(browser_window_->GetProfile()),
@@ -476,6 +489,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     StopObservingAgentPresence();
     split_controller_->Stop();
     workspace_controller_->Stop();
+    preference_backend_.reset();
     tab_list_ = nullptr;
     browser_window_ = nullptr;
     title_observers_.clear();
@@ -515,6 +529,14 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
                            sourceState:base::SysUTF8ToNSString(std::string(
                                            HerdrAgentSourceStateName(
                                                snapshot.state)))];
+  }
+
+  void OnRailDensityChanged(const EffectivePreferenceValue& effective_value) {
+    NSString* value = effective_value.value.rail_density ==
+                              RailDensity::kComfortable
+                          ? @"comfortable"
+                          : @"compact";
+    [native_view_ updateRailDensity:value];
   }
 
   void UpdateSnapshot() {
@@ -661,7 +683,12 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   }
 
   SwiftUITabRailSnapshotForTesting SnapshotForTesting() const {
+    [native_view_ layoutSubtreeIfNeeded];
     SwiftUITabRailSnapshotForTesting snapshot;
+    snapshot.rail_density =
+        base::SysNSStringToUTF8(native_view_.railDensityForTesting);
+    snapshot.first_tab_row_height =
+        NSHeight(native_view_.firstTabRowFrameForTesting);
     snapshot.workspaces_enabled = native_view_.workspacesEnabledForTesting;
     snapshot.window_identifier = base::SysNSStringToUTF8(
         native_view_.workspaceWindowIdentifierForTesting);
@@ -1010,6 +1037,11 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   void SimulateMissingProductIdentityMappingForTesting() {
     simulate_missing_product_identity_mapping_for_testing_ = true;
     UpdateSnapshot();
+  }
+
+  bool UpdateRailDensityForTesting(const std::string& rail_density) {
+    return
+        [native_view_ updateRailDensity:base::SysUTF8ToNSString(rail_density)];
   }
 
   bool PreHandleLeaderKeyboardEvent(
@@ -1362,6 +1394,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   std::unique_ptr<WorkspaceController> workspace_controller_;
   std::unique_ptr<SplitPaneController> split_controller_;
   std::unique_ptr<LeaderShortcutController> leader_controller_;
+  std::unique_ptr<ProfilePreferenceControlBackend> preference_backend_;
   base::CallbackListSubscription browser_did_close_subscription_;
   std::vector<std::unique_ptr<TabTitleObserver>> title_observers_;
   bool observing_agent_presence_ = false;
@@ -1463,6 +1496,12 @@ bool SimulateMissingSwiftUIProductIdentityMappingForTesting(views::View* rail) {
   }
   host->SimulateMissingProductIdentityMappingForTesting();
   return true;
+}
+
+bool UpdateSwiftUIRailDensityForTesting(views::View* rail,
+                                        const std::string& rail_density) {
+  SwiftUITabRailHost* host = FindHost(rail);
+  return host && host->UpdateRailDensityForTesting(rail_density);
 }
 
 std::optional<SwiftUIAgentRailSnapshotForTesting>

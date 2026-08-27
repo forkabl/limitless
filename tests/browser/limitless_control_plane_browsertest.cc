@@ -6,7 +6,14 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/browser.h"
+#include "chrome/test/base/in_process_browser_test.h"
+#include "components/prefs/pref_registry.h"
+#include "components/prefs/pref_service.h"
+#include "content/public/test/browser_test.h"
 #include "shell/control_plane/limitless_preference_control_service.h"
+#include "shell/control_plane/limitless_profile_prefs.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace limitless {
@@ -140,6 +147,22 @@ TEST(LimitlessControlPlaneBrowserTest,
   ASSERT_EQ(1u, backend.audit.size());
   EXPECT_EQ(PreferenceValueSource::kManaged,
             backend.audit.front().effective_value->source);
+}
+
+class LimitlessProfilePrefsBrowserTest : public InProcessBrowserTest {};
+
+IN_PROC_BROWSER_TEST_F(LimitlessProfilePrefsBrowserTest,
+                       RegistersRailDensityAsNonSyncProfilePref) {
+  PrefService* profile_prefs = browser()->GetProfile()->GetPrefs();
+  const PrefService::Preference* rail_density =
+      profile_prefs->FindPreference(kRailDensityPref);
+
+  ASSERT_NE(nullptr, rail_density);
+  EXPECT_EQ(base::Value::Type::STRING, rail_density->GetType());
+  EXPECT_EQ(kCompactRailDensity, profile_prefs->GetString(kRailDensityPref));
+  EXPECT_TRUE(rail_density->IsDefaultValue());
+  EXPECT_EQ(PrefRegistry::NO_REGISTRATION_FLAGS,
+            rail_density->registration_flags());
 }
 
 }  // namespace

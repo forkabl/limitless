@@ -15,3 +15,38 @@ source_set("preference_control") {
   public_deps = [ "//base" ]
   public_configs = [ ":preference_control_public" ]
 }
+
+config("profile_prefs_public") {
+  defines = [ "LIMITLESS_PROFILE_PREFS_ENABLED" ]
+  include_dirs = [ "." ]
+}
+
+source_set("profile_prefs") {
+  sources = [
+    "limitless_profile_prefs.cc",
+    "limitless_profile_prefs.h",
+  ]
+
+  public_deps = [ "//components/pref_registry" ]
+  public_configs = [ ":profile_prefs_public" ]
+}
+
+source_set("profile_preference_backend") {
+  sources = [
+    "limitless_profile_preference_backend.cc",
+    "limitless_profile_preference_backend.h",
+  ]
+
+  public_deps = [
+    ":preference_control",
+    ":profile_prefs",
+    "//base",
+  ]
+  public_configs = [ ":preference_control_public" ]
+
+  deps = [
+    "//chrome/browser/profiles",
+    "//components/prefs",
+    "//crypto",
+  ]
+}
