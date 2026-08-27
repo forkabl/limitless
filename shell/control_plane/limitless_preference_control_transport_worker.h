@@ -9,6 +9,7 @@
 #include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
 #include "base/memory/ref_counted.h"
+#include "base/synchronization/lock.h"
 #include "base/sequence_checker.h"
 
 namespace limitless {
@@ -17,10 +18,14 @@ struct TransportCancellationState
     : public base::RefCountedThreadSafe<TransportCancellationState> {
   TransportCancellationState();
   void Cancel();
+  void InstallWriter(int fd);
+  void ClearWriter();
   std::atomic<bool> cancelled{false};
+  base::Lock lock;
+  int writer_fd = -1;
  private:
   friend class base::RefCountedThreadSafe<TransportCancellationState>;
-  ~TransportCancellationState() = default;
+  ~TransportCancellationState();
 };
 
 class PreferenceControlTransportWorker {
@@ -34,9 +39,12 @@ class PreferenceControlTransportWorker {
     std::string instance_id;
     std::string capability;
   };
+  enum class WorkerPrepareStatus { kSuccess, kCancelled, kRuntimeDirectory,
+                                   kCollision, kSocket, kCredential, kDescriptor,
+                                   kCancellationChannel };
   struct PrepareResult {
     bool succeeded = false;
-    int status = 0;
+    WorkerPrepareStatus status = WorkerPrepareStatus::kRuntimeDirectory;
     base::FilePath socket_path;
     base::FilePath descriptor_path;
     base::FilePath credential_path;
@@ -56,6 +64,9 @@ class PreferenceControlTransportWorker {
   base::ScopedFD listener_;
   base::ScopedFD cancellation_reader_;
   bool published_ = false;
+  bool owns_socket_ = false;
+  bool owns_credential_ = false;
+  bool owns_descriptor_ = false;
 };
 
 }  // namespace limitless
