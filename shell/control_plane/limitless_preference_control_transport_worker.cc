@@ -349,11 +349,13 @@ PreferenceControlTransportWorker::Prepare() {
   if (flags < 0 || status < 0 ||
       fcntl(listener_.get(), F_SETFD, flags | FD_CLOEXEC) != 0 ||
       fcntl(listener_.get(), F_SETFL, status | O_NONBLOCK) != 0) {
+    result.status = WorkerPrepareStatus::kSocket;
     return result;
   }
   sockaddr_un address = {};
   address.sun_family = AF_UNIX;
   if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) {
+    result.status = WorkerPrepareStatus::kSocket;
     return result;
   }
   memcpy(address.sun_path, inputs_.socket_path.value().c_str(),
@@ -424,6 +426,14 @@ PreferenceControlTransportWorker::Prepare() {
     return result;
   }
   cancellation_->InstallWriter(pipe_fds[1]);
+  if (inputs_.before_credential_publication) {
+    inputs_.before_credential_publication();
+  }
+  if (cancellation_->cancelled.load(std::memory_order_acquire)) {
+    result.status = WorkerPrepareStatus::kCancelled;
+    Cleanup();
+    return result;
+  }
   if (cancellation_->cancelled.load(std::memory_order_acquire) ||
       !WritePrivateFileNoReplaceAt(
           runtime_directory_fd_.get(), credential_basename, inputs_.capability,
@@ -433,6 +443,14 @@ PreferenceControlTransportWorker::Prepare() {
     return result;
   }
   owns_credential_ = true;
+  if (inputs_.before_descriptor_publication) {
+    inputs_.before_descriptor_publication();
+  }
+  if (cancellation_->cancelled.load(std::memory_order_acquire)) {
+    result.status = WorkerPrepareStatus::kCancelled;
+    Cleanup();
+    return result;
+  }
   base::DictValue descriptor_value;
   descriptor_value.Set("version", 1);
   descriptor_value.Set("profile_id", inputs_.profile_id);

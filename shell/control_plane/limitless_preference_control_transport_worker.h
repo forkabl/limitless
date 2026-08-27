@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -47,6 +48,8 @@ class PreferenceControlTransportWorker {
     std::string instance_id;
     std::string capability;
     bool force_post_bind_failure = false;
+    std::function<void()> before_credential_publication;
+    std::function<void()> before_descriptor_publication;
   };
   enum class WorkerPrepareStatus {
     kSuccess,
