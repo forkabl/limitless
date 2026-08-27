@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "chromium_base_sha": "2b4613f0a24d234b139f1246028239a2f5dde58c",
+  "patches": [
+    {
+      "file": "0001-webui-browser-limitless-resources.patch",
+      "sha256": "731b5a70842840c54f58cd476dde7c9c84cbbb21606ee60649415e8b3fe66bfa",
+      "upstream_files": [
+        "chrome/browser/ui/webui_browser/BUILD.gn",
+        "chrome/browser/ui/webui_browser/webui_browser_ui.cc"
+      ],
+      "upstream_symbols": [
+        "source_set(\"impl\")",
+        "source_set(\"browser_tests\")",
+        "WebUIBrowserUI::WebUIBrowserUI"
+      ],
+      "limitless_targets": [
+        "$limitless_root/build/chromium:resources",
+        "$limitless_root/build/chromium:webui_browser_tests"
+      ],
+      "tests": [
+        "$limitless_root/shell/resources:lint",
+        "//chrome/test:browser_tests --gtest_filter=LimitlessWebUIBrowserTest.*",
+        "//chrome/test:browser_tests --gtest_filter=WebUIBrowserTest.*:WebUIBrowserSurfaceEmbedPixelTest.*"
+      ],
+      "conflict_signals": [
+        "The WebUI Browser impl or browser_tests source set is renamed or split.",
+        "WebUIBrowserUI stops owning the chrome://webui-browser data source.",
+        "SetupWebUIDataSource no longer installs the upstream WebUI Browser resources.",
+        "SetRequestFilter changes its request matching or callback lifetime contract.",
+        "The external build_webui target or generated include config no longer resolves through a system-absolute GN label."
+      ],
+      "removal_condition": "Remove this patch when Chromium provides a supported external WebUI Browser frontend resource provider and browser-test dependency seam, or remove it if the Gate 2 substrate experiment fails."
+    }
+  ]
+}

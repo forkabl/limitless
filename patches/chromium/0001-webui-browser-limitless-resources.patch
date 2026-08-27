@@ -1,0 +1,113 @@
+diff --git a/chrome/browser/ui/webui_browser/BUILD.gn b/chrome/browser/ui/webui_browser/BUILD.gn
+--- a/chrome/browser/ui/webui_browser/BUILD.gn
++++ b/chrome/browser/ui/webui_browser/BUILD.gn
+@@ -4,6 +4,17 @@
+ 
+ import("//mojo/public/tools/bindings/mojom.gni")
+ 
++declare_args() {
++  # System-absolute path to the Limitless repository. An empty value keeps
++  # the Chromium build graph and WebUI Browser resources unchanged.
++  limitless_root = ""
++}
++
++if (limitless_root != "") {
++  assert(path_exists("$limitless_root/build/chromium/BUILD.gn"),
++         "limitless_root must point to the Limitless repository.")
++}
++
+ assert(!is_android)
+ 
+ source_set("headers") {
+@@ -141,6 +152,11 @@ source_set("impl") {
+     "//ui/webui/tracked_element",
+   ]
+ 
++  if (limitless_root != "") {
++    defines = [ "LIMITLESS_BUILD" ]
++    deps += [ "$limitless_root/build/chromium:resources" ]
++  }
++
+   if (is_chromeos) {
+     deps += [ "//chrome/browser/ui/ash/system_web_apps" ]
+   }
+@@ -203,4 +219,8 @@ source_set("browser_tests") {
+     "//skia",
+     "//ui/gfx/geometry",
+   ]
++
++  if (limitless_root != "") {
++    deps += [ "$limitless_root/build/chromium:webui_browser_tests" ]
++  }
+ }
+diff --git a/chrome/browser/ui/webui_browser/webui_browser_ui.cc b/chrome/browser/ui/webui_browser/webui_browser_ui.cc
+--- a/chrome/browser/ui/webui_browser/webui_browser_ui.cc
++++ b/chrome/browser/ui/webui_browser/webui_browser_ui.cc
+@@ -4,6 +4,17 @@
+ 
+ #include "chrome/browser/ui/webui_browser/webui_browser_ui.h"
+ 
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#if defined(LIMITLESS_BUILD)
++#include "base/functional/bind.h"
++#include "base/memory/ref_counted_memory.h"
++#include "limitless_shell_resources.h"
++#endif
++
+ #include "base/notimplemented.h"
+ #include "chrome/browser/bookmarks/bookmark_model_factory.h"
+ #include "chrome/browser/contextual_search/contextual_search_service_factory.h"
+@@ -54,6 +65,38 @@
+ 
+ namespace {
+ 
++#if defined(LIMITLESS_BUILD)
++
++std::string_view LimitlessResourcePath(const std::string& request_path) {
++  std::string_view resource_path(request_path);
++  return resource_path.substr(0, resource_path.find_first_of("?#"));
++}
++
++bool ShouldHandleLimitlessResource(const std::string& path) {
++  const std::string_view resource_path = LimitlessResourcePath(path);
++  return resource_path.empty() || resource_path == "limitless/app.css" ||
++         resource_path == "limitless/app.js";
++}
++
++void HandleLimitlessResource(
++    const std::string& path,
++    content::WebUIDataSource::GotDataCallback callback) {
++  const std::string_view resource_path = LimitlessResourcePath(path);
++  std::string_view response;
++  if (resource_path.empty()) {
++    response = limitless::resources::kWebUiBrowserHtml;
++  } else if (resource_path == "limitless/app.css") {
++    response = limitless::resources::kAppCss;
++  } else {
++    response = limitless::resources::kAppJavaScript;
++  }
++
++  std::move(callback).Run(
++      base::MakeRefCounted<base::RefCountedString>(std::string(response)));
++}
++
++#endif  // defined(LIMITLESS_BUILD)
++
+ std::string SidePanelEntryIdToTitle(SidePanelEntryId id) {
+   // TODO(webium): Ideally, the titles should be added to SIDE_PANEL_ENTRY_IDS
+   // macros in chrome/browser/ui/side_panel/side_panel_entry_id.h, and
+@@ -111,6 +154,10 @@ WebUIBrowserUI::WebUIBrowserUI(content::WebUI* web_ui)
+   // Add required resources.
+   webui::SetupWebUIDataSource(source, kWebuiBrowserResources,
+                               IDR_WEBUI_BROWSER_WEBUI_BROWSER_HTML);
++#if defined(LIMITLESS_BUILD)
++  source->SetRequestFilter(base::BindRepeating(&ShouldHandleLimitlessResource),
++                           base::BindRepeating(&HandleLimitlessResource));
++#endif
+   source->AddResourcePaths(kTabStripApiResources);
+   source->AddResourcePaths(kWebuiToolbarSharedResources);
+ 

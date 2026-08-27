@@ -1,0 +1,36 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+assert(is_mac && current_cpu == "arm64",
+       "The Phase 1 Limitless foundation currently supports macOS arm64 only.")
+
+# Chromium depends on this stable label. The WebUI resource implementation
+# stays beside its source files so build_webui can preserve clean resource
+# paths without staging or copying product sources into chromium/src.
+group("resources") {
+  public_deps = [ "../../shell/resources" ]
+}
+
+# This source set is folded into Chromium's existing WebUI Browser browser-test
+# target by the validation patch. The tests remain owned by limitless/tests.
+source_set("webui_browser_tests") {
+  testonly = true
+  defines = [ "HAS_OUT_OF_PROC_TEST_RUNNER" ]
+
+  sources = [ "../../tests/browser/limitless_webui_browser_browsertest.cc" ]
+
+  deps = [
+    "//base/test:test_support",
+    "//chrome/browser/ui",
+    "//chrome/browser/ui/webui_browser",
+    "//chrome/browser/ui/webui_browser:impl",
+    "//chrome/common:chrome_features",
+    "//chrome/test:test_support",
+    "//components/surface_embed/common",
+    "//content/public/browser",
+    "//content/test:test_support",
+    "//ui/base",
+    "//url",
+  ]
+}
