@@ -114,6 +114,7 @@
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/accelerators/test_accelerator_target.h"
+#include "ui/base/test/scoped_fake_nswindow_fullscreen.h"
 #include "ui/events/event.h"
 #include "ui/events/event_constants.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
@@ -880,8 +881,8 @@ IN_PROC_BROWSER_TEST_F(
            compact->first_tab_row_height == 28;
   }));
 
-  browser()->GetProfile()->GetPrefs()->SetString(
-      limitless::kRailDensityPref, "comfortable");
+  browser()->GetProfile()->GetPrefs()->SetString(limitless::kRailDensityPref,
+                                                 "comfortable");
   std::optional<limitless::SwiftUITabRailSnapshotForTesting> comfortable;
   ASSERT_TRUE(base::test::RunUntil([&]() {
     comfortable = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
@@ -1829,6 +1830,7 @@ IN_PROC_BROWSER_TEST_F(
 IN_PROC_BROWSER_TEST_F(
     LimitlessSwiftUIBrowserTest,
     NativeBrowserFullscreenPreservesExactSplitProjectionAndPaneFocus) {
+  ui::test::ScopedFakeNSWindowFullscreen fake_fullscreen;
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), https_server_.GetURL("a.test", "/keys")));
   ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
@@ -1948,10 +1950,7 @@ IN_PROC_BROWSER_TEST_F(
     }
     NSWindow* native_window =
         browser()->GetWindow()->GetNativeWindow().GetNativeNSWindow();
-    const bool native_fullscreen =
-        native_window &&
-        (native_window.styleMask & NSWindowStyleMaskFullScreen) != 0;
-    if (native_fullscreen != expected_fullscreen) {
+    if (current_view->IsFullscreen() != expected_fullscreen) {
       return false;
     }
     split_tabs::SplitTabData* current = tab_strip->GetSplitData(split_id);
