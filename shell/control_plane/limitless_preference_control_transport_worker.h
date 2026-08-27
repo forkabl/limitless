@@ -16,6 +16,11 @@
 
 namespace limitless {
 
+struct ArtifactIdentity {
+  dev_t dev = 0;
+  ino_t ino = 0;
+};
+
 struct TransportCancellationState
     : public base::RefCountedThreadSafe<TransportCancellationState> {
   TransportCancellationState();
@@ -76,14 +81,13 @@ class PreferenceControlTransportWorker {
   base::ScopedFD listener_;
   base::ScopedFD runtime_directory_fd_;
   base::ScopedFD cancellation_reader_;
+  base::ScopedFD credential_identity_fd_;
+  base::ScopedFD descriptor_identity_fd_;
   bool published_ = false;
   bool owns_socket_ = false;
   bool owns_credential_ = false;
   bool owns_descriptor_ = false;
-  struct ArtifactIdentity {
-    dev_t dev = 0;
-    ino_t ino = 0;
-  } socket_identity_, credential_identity_, descriptor_identity_;
+  ArtifactIdentity socket_identity_, credential_identity_, descriptor_identity_;
 };
 
 }  // namespace limitless
