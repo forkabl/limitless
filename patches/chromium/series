@@ -10,3 +10,4 @@
 0010-webui-browser-split-test-wiring.patch
 0011-macos-modal-dialog-reactivation.patch
 0012-macos-immersive-tab-overlay-safety.patch
+0013-profile-pref-registration.patch
