@@ -123,5 +123,34 @@ IN_PROC_BROWSER_TEST_F(LimitlessProfilePreferenceBackendBrowserTest,
   EXPECT_EQ(kCompactRailDensity, regular_prefs->GetString(kRailDensityPref));
 }
 
+IN_PROC_BROWSER_TEST_F(LimitlessProfilePreferenceBackendBrowserTest,
+                       AuditLogRetainsNewest256RecordsWithMonotonicSequence) {
+  Profile* profile = browser()->GetProfile();
+  ProfilePreferenceControlBackend backend(profile);
+  PreferenceControlService service(&backend);
+  for (int i = 0; i < 260; ++i) {
+    PreferenceControlResult result = service.Execute(MakeWriteRequest(
+        backend, i % 2 ? RailDensity::kCompact : RailDensity::kComfortable));
+    ASSERT_TRUE(result.succeeded());
+    EXPECT_EQ(static_cast<uint64_t>(i + 1), result.audit_sequence);
+  }
+  const base::ListValue& records =
+      profile->GetPrefs()->GetList(kPreferenceAuditRecordsPref);
+  ASSERT_EQ(256u, records.size());
+  EXPECT_EQ(5, records.front().GetDict().FindInt("sequence"));
+  EXPECT_EQ(260, records.back().GetDict().FindInt("sequence"));
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessProfilePreferenceBackendBrowserTest,
+                       CorruptedRailDensityFailsSafeToCompact) {
+  Profile* profile = browser()->GetProfile();
+  profile->GetPrefs()->SetString(kRailDensityPref, "corrupt-value");
+  ProfilePreferenceControlBackend backend(profile);
+  EffectivePreferenceValue effective =
+      backend.GetEffectiveValue(PreferenceKey::kRailDensity);
+  EXPECT_EQ(RailDensity::kCompact, effective.value.rail_density);
+  EXPECT_EQ(PreferenceValueSource::kUser, effective.source);
+}
+
 }  // namespace
 }  // namespace limitless

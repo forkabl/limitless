@@ -25,7 +25,7 @@ audit sink without recording credentials, paths, WebContents, or raw handles.
 The running-profile slice now supplies the registered non-sync Chromium
 preference, opaque profile identity and capability issuance, live
 `PrefChangeRegistrar` projection into the native SwiftUI rail, and bounded
-append-only audit retention (256 records). External running-process CLI or
+bounded FIFO/recent audit log (256 records). External running-process CLI or
 agent transport and clean process-restart coverage remain future work.
 Malformed transport requests will be audited at that transport boundary.
 Leader and split host routes remain unchanged until the registry receives
