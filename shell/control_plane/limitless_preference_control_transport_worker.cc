@@ -343,8 +343,8 @@ void TransportCancellationState::Cancel() {
   scoped_refptr<PendingRequest> request;
   {
     base::AutoLock guard(lock_);
-    if (active_fd_ >= 0) {
-      ShutdownNoIntr(active_fd_);
+    if (active_fd_.is_valid()) {
+      ShutdownNoIntr(active_fd_.get());
     }
     request = active_request_;
     if (writer_fd_.is_valid()) {
@@ -370,21 +370,33 @@ void TransportCancellationState::ClearWriter() {
 }
 
 uint64_t TransportCancellationState::InstallAcceptedFd(int fd) {
+  if (fd < 0) {
+    return 0;
+  }
+  const int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+  if (duplicate < 0) {
+    return 0;
+  }
+  base::ScopedFD owned_fd(duplicate);
   scoped_refptr<PendingRequest> superseded_request;
-  uint64_t token;
+  base::ScopedFD superseded_fd;
+  uint64_t token = 0;
   {
     base::AutoLock guard(lock_);
-    if (active_fd_ >= 0) {
-      ShutdownNoIntr(active_fd_);
+    if (next_registration_token_ == std::numeric_limits<uint64_t>::max()) {
+      return 0;
     }
+    superseded_fd = std::move(active_fd_);
     superseded_request = std::move(active_request_);
-    CHECK_NE(next_registration_token_, std::numeric_limits<uint64_t>::max());
     token = ++next_registration_token_;
     active_registration_token_ = token;
-    active_fd_ = fd;
-    if (cancelled.load(std::memory_order_acquire) && active_fd_ >= 0) {
-      ShutdownNoIntr(active_fd_);
+    active_fd_ = std::move(owned_fd);
+    if (cancelled.load(std::memory_order_acquire)) {
+      ShutdownNoIntr(active_fd_.get());
     }
+  }
+  if (superseded_fd.is_valid()) {
+    ShutdownNoIntr(superseded_fd.get());
   }
   if (superseded_request) {
     superseded_request->Cancel();
@@ -399,7 +411,7 @@ bool TransportCancellationState::InstallPendingRequest(
   {
     base::AutoLock guard(lock_);
     if (!cancelled.load(std::memory_order_acquire) && request && token != 0 &&
-        token == active_registration_token_ && active_fd_ >= 0 &&
+        token == active_registration_token_ && active_fd_.is_valid() &&
         !active_request_) {
       active_request_ = request;
       installed = true;
@@ -413,16 +425,22 @@ bool TransportCancellationState::InstallPendingRequest(
 
 void TransportCancellationState::ClearActive(uint64_t token) {
   scoped_refptr<PendingRequest> request;
+  base::ScopedFD old_fd;
   {
     base::AutoLock guard(lock_);
     if (token == 0 || token != active_registration_token_) {
       return;
     }
     active_registration_token_ = 0;
-    active_fd_ = -1;
+    old_fd = std::move(active_fd_);
     request = std::move(active_request_);
   }
-  request.reset();
+  if (old_fd.is_valid()) {
+    ShutdownNoIntr(old_fd.get());
+  }
+  if (request) {
+    request->Cancel();
+  }
 }
 
 PreferenceControlTransportWorker::PreferenceControlTransportWorker(

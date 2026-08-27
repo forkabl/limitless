@@ -73,7 +73,7 @@ struct TransportCancellationState
   base::ScopedFD writer_fd_;
   uint64_t next_registration_token_ = 0;
   uint64_t active_registration_token_ = 0;
-  int active_fd_ = -1;
+  base::ScopedFD active_fd_;
   scoped_refptr<PendingRequest> active_request_;
 };
 
