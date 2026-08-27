@@ -2,10 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "shell/control_plane/limitless_preference_control_transport.h"
+#include <arpa/inet.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <unistd.h>
 
-#include <sys/stat.h>
-
+#include <cstring>
 #include <initializer_list>
 #include <optional>
 #include <string>
@@ -15,6 +19,7 @@
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
+#include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
@@ -32,6 +37,7 @@
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
+#include "shell/control_plane/limitless_preference_control_transport.h"
 #include "shell/control_plane/limitless_profile_prefs.h"
 #include "shell/control_plane/limitless_running_profile_control_registry.h"
 #include "shell/native/swiftui_rail/limitless_swiftui_rail_host.h"
@@ -44,11 +50,6 @@ struct CliResult {
   bool launched = false;
   int exit_code = -1;
   std::string output;
-};
-
-struct AliasedDescriptor {
-  base::FilePath descriptor;
-  base::FilePath credential;
 };
 
 base::FilePath LimitlessCtlPath() {
@@ -108,51 +109,115 @@ void AppendArguments(std::vector<std::string>* destination,
   }
 }
 
-AliasedDescriptor WriteAliasedDescriptor(
-    const base::FilePath& source_descriptor,
-    const base::FilePath& runtime_directory,
-    std::string_view profile_identifier,
-    std::string_view instance_identifier) {
-  std::string serialized;
-  EXPECT_TRUE(base::ReadFileToString(source_descriptor, &serialized));
-  std::optional<base::Value> parsed =
-      base::JSONReader::Read(serialized, base::JSON_PARSE_RFC);
-  EXPECT_TRUE(parsed && parsed->is_dict());
-  if (!parsed || !parsed->is_dict()) {
-    return {};
+bool ReadExactly(int descriptor, void* output, size_t length) {
+  char* cursor = static_cast<char*>(output);
+  while (length > 0) {
+    const ssize_t count = read(descriptor, cursor, length);
+    if (count <= 0) {
+      return false;
+    }
+    cursor += count;
+    length -= static_cast<size_t>(count);
   }
-  base::DictValue descriptor = std::move(*parsed).TakeDict();
-  const std::string* source_credential =
-      descriptor.FindString("credential_path");
-  EXPECT_TRUE(source_credential);
-  std::string capability;
-  EXPECT_TRUE(
-      source_credential &&
-      base::ReadFileToString(base::FilePath(*source_credential), &capability));
-  if (!source_credential || capability.empty()) {
-    return {};
-  }
-
-  const std::string endpoint_stem =
-      std::string(profile_identifier) + "." + std::string(instance_identifier);
-  AliasedDescriptor alias{
-      .descriptor = runtime_directory.AppendASCII(endpoint_stem + ".json"),
-      .credential = runtime_directory.AppendASCII(endpoint_stem + ".token"),
-  };
-  EXPECT_TRUE(base::WriteFile(alias.credential, capability));
-  EXPECT_EQ(0, chmod(alias.credential.value().c_str(), S_IRUSR | S_IWUSR));
-  descriptor.Set("profile_id", profile_identifier);
-  descriptor.Set("instance_id", instance_identifier);
-  descriptor.Set("credential_path", alias.credential.value());
-  EXPECT_TRUE(base::JSONWriter::Write(descriptor, &serialized));
-  EXPECT_TRUE(base::WriteFile(alias.descriptor, serialized));
-  EXPECT_EQ(0, chmod(alias.descriptor.value().c_str(), S_IRUSR | S_IWUSR));
-  return alias;
+  return true;
 }
 
-void DeleteAlias(const AliasedDescriptor& alias) {
-  EXPECT_TRUE(base::DeleteFile(alias.descriptor));
-  EXPECT_TRUE(base::DeleteFile(alias.credential));
+bool WriteExactly(int descriptor, const void* input, size_t length) {
+  const char* cursor = static_cast<const char*>(input);
+  while (length > 0) {
+    const ssize_t count = send(descriptor, cursor, length, MSG_NOSIGNAL);
+    if (count <= 0) {
+      return false;
+    }
+    cursor += count;
+    length -= static_cast<size_t>(count);
+  }
+  return true;
+}
+
+std::string RawPreferenceWriteBlocking(base::FilePath socket_path,
+                                       std::string profile_identifier,
+                                       std::string instance_identifier,
+                                       std::string capability) {
+  base::ScopedFD connection(socket(AF_UNIX, SOCK_STREAM, 0));
+  if (!connection.is_valid()) {
+    return {};
+  }
+  const timeval timeout = {.tv_sec = 3, .tv_usec = 0};
+  if (setsockopt(connection.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                 sizeof(timeout)) != 0 ||
+      setsockopt(connection.get(), SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                 sizeof(timeout)) != 0) {
+    return {};
+  }
+  sockaddr_un address = {};
+  if (socket_path.value().size() >= sizeof(address.sun_path)) {
+    return {};
+  }
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, socket_path.value().c_str(),
+              socket_path.value().size() + 1);
+  const socklen_t address_length = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + socket_path.value().size() + 1);
+  if (connect(connection.get(), reinterpret_cast<sockaddr*>(&address),
+              address_length) != 0) {
+    return {};
+  }
+
+  base::DictValue request;
+  request.Set("version", 1);
+  request.Set("request_id", base::Uuid::GenerateRandomV4().AsLowercaseString());
+  request.Set("operation", "write");
+  base::DictValue target;
+  target.Set("profile_id", profile_identifier);
+  target.Set("instance_id", instance_identifier);
+  request.Set("target", std::move(target));
+  base::DictValue actor;
+  actor.Set("type", "cli");
+  actor.Set("id", "limitless-control-browser-test");
+  request.Set("actor", std::move(actor));
+  base::DictValue authentication;
+  authentication.Set("scheme", "capability");
+  authentication.Set("credential", capability);
+  request.Set("authentication", std::move(authentication));
+  request.Set("key", "rail_density");
+  request.Set("value", "comfortable");
+  std::string serialized;
+  if (!base::JSONWriter::Write(request, &serialized)) {
+    return {};
+  }
+  const uint32_t network_size = htonl(static_cast<uint32_t>(serialized.size()));
+  if (!WriteExactly(connection.get(), &network_size, sizeof(network_size)) ||
+      !WriteExactly(connection.get(), serialized.data(), serialized.size())) {
+    return {};
+  }
+  uint32_t response_size = 0;
+  if (!ReadExactly(connection.get(), &response_size, sizeof(response_size))) {
+    return {};
+  }
+  response_size = ntohl(response_size);
+  if (response_size == 0 ||
+      response_size > kMaximumPreferenceTransportResponseBytes) {
+    return {};
+  }
+  std::string response(response_size, '\0');
+  return ReadExactly(connection.get(), response.data(), response.size())
+             ? response
+             : std::string();
+}
+
+std::string RawPreferenceWrite(base::FilePath socket_path,
+                               std::string profile_identifier,
+                               std::string instance_identifier,
+                               std::string capability) {
+  base::test::TestFuture<std::string> result;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+      base::BindOnce(&RawPreferenceWriteBlocking, std::move(socket_path),
+                     std::move(profile_identifier),
+                     std::move(instance_identifier), std::move(capability)),
+      result.GetCallback());
+  return result.Take();
 }
 
 class LimitlessPreferenceControlTransportBrowserTest
@@ -303,6 +368,9 @@ IN_PROC_BROWSER_TEST_F(
   const std::string* credential_path_value =
       parsed_descriptor->GetDict().FindString("credential_path");
   ASSERT_TRUE(credential_path_value);
+  const std::string* socket_path_value =
+      parsed_descriptor->GetDict().FindString("socket_path");
+  ASSERT_TRUE(socket_path_value);
   const base::FilePath credential_path(*credential_path_value);
   std::string real_capability;
   ASSERT_TRUE(base::ReadFileToString(credential_path, &real_capability));
@@ -320,34 +388,55 @@ IN_PROC_BROWSER_TEST_F(
 
   const std::string stale_instance =
       base::Uuid::GenerateRandomV4().AsLowercaseString();
-  const AliasedDescriptor stale_descriptor =
-      WriteAliasedDescriptor(descriptor_path, runtime_directory,
-                             backend->profile_identifier(), stale_instance);
-  ASSERT_FALSE(stale_descriptor.descriptor.empty());
-  const CliResult stale =
+  const CliResult stale_cli =
       run_profile(backend->profile_identifier(), stale_instance);
-  ASSERT_TRUE(stale.launched);
-  EXPECT_EQ(3, stale.exit_code) << stale.output;
+  ASSERT_TRUE(stale_cli.launched);
+  EXPECT_EQ(2, stale_cli.exit_code) << stale_cli.output;
+  const base::DictValue stale_cli_result = ParseCliResult(stale_cli);
+  EXPECT_EQ("error", FindStringOrEmpty(stale_cli_result, "status"));
+  EXPECT_EQ("profile_unavailable",
+            FindStringOrEmpty(stale_cli_result, "error"));
+
+  // The CLI rejects an undiscoverable stale instance locally. Exercise the
+  // authenticated wire boundary directly to prove that the running browser
+  // independently rejects the same stale target.
+  const CliResult stale{
+      .launched = true,
+      .exit_code = 3,
+      .output = RawPreferenceWrite(base::FilePath(*socket_path_value),
+                                   std::string(backend->profile_identifier()),
+                                   stale_instance,
+                                   std::string(backend->capability())),
+  };
+  ASSERT_FALSE(stale.output.empty());
   EXPECT_EQ("stale_profile",
             FindStringOrEmpty(ParseCliResult(stale), "status"));
 
   const std::string foreign_profile =
       base::Uuid::GenerateRandomV4().AsLowercaseString();
-  const AliasedDescriptor foreign_descriptor = WriteAliasedDescriptor(
-      descriptor_path, runtime_directory, foreign_profile,
-      backend->profile_instance_identifier());
-  ASSERT_FALSE(foreign_descriptor.descriptor.empty());
-  const CliResult foreign =
+  const CliResult foreign_cli =
       run_profile(foreign_profile, backend->profile_instance_identifier());
-  ASSERT_TRUE(foreign.launched);
-  EXPECT_EQ(3, foreign.exit_code) << foreign.output;
+  ASSERT_TRUE(foreign_cli.launched);
+  EXPECT_EQ(2, foreign_cli.exit_code) << foreign_cli.output;
+  const base::DictValue foreign_cli_result = ParseCliResult(foreign_cli);
+  EXPECT_EQ("error", FindStringOrEmpty(foreign_cli_result, "status"));
+  EXPECT_EQ("profile_unavailable",
+            FindStringOrEmpty(foreign_cli_result, "error"));
+
+  const CliResult foreign{
+      .launched = true,
+      .exit_code = 3,
+      .output = RawPreferenceWrite(
+          base::FilePath(*socket_path_value), foreign_profile,
+          std::string(backend->profile_instance_identifier()),
+          std::string(backend->capability())),
+  };
+  ASSERT_FALSE(foreign.output.empty());
   EXPECT_EQ("profile_mismatch",
             FindStringOrEmpty(ParseCliResult(foreign), "status"));
   EXPECT_EQ(kCompactRailDensity,
             profile->GetPrefs()->GetString(kRailDensityPref));
 
-  DeleteAlias(stale_descriptor);
-  DeleteAlias(foreign_descriptor);
   Browser* const private_browser = CreateIncognitoBrowser(profile);
   ASSERT_TRUE(private_browser);
   EXPECT_TRUE(private_browser->GetProfile()->IsOffTheRecord());
