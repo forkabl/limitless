@@ -113,6 +113,7 @@ enum class ProductCommandOrigin {
   kCommandPalette,
   kCli,
   kAgent,
+  kExternal,
 };
 
 enum class ProductCommandValidationStatus {
@@ -145,6 +146,14 @@ enum class ProductCommandExecutionStatus {
   kUnsupported,
   kInvalidInvocation,
   kFailed,
+  kDeadlineExceeded,
+  kPreconditionFailed,
+};
+
+enum class ProductCommandPreExecuteDecision {
+  kAllow,
+  kDeadlineExceeded,
+  kPreconditionFailed,
 };
 
 struct ProductCommandExecutionResult {
@@ -160,7 +169,9 @@ std::optional<ProductCommandId> ParseProductCommandName(std::string_view name);
 ProductCommandValidationStatus ValidateProductCommandInvocation(
     const ProductCommandInvocation& invocation);
 
-// Stateless dispatch boundary for menus, shortcuts, palettes, CLI, and agents.
+// Stateless dispatch boundary for menus, shortcuts, palettes, CLI, agents,
+// and other external callers. Each request is validated, queried against live
+// authority, optionally guarded once, then executed.
 // It stores adapters but no browser or command state. Query is evaluated for
 // every request, including immediately before Execute calls the authoritative
 // executor. The executor must still revalidate because authority can change
@@ -172,6 +183,8 @@ class ProductCommandRegistry {
   using ExecuteCallback = base::RepeatingCallback<ProductCommandExecutionResult(
       const ProductCommandInvocation& invocation,
       ProductCommandOrigin origin)>;
+  using PreExecuteGuard = base::OnceCallback<ProductCommandPreExecuteDecision(
+      const ProductCommandInvocation&)>;
 
   ProductCommandRegistry(QueryCallback query, ExecuteCallback execute);
   ProductCommandRegistry(const ProductCommandRegistry&) = delete;
@@ -183,6 +196,10 @@ class ProductCommandRegistry {
   ProductCommandExecutionResult Execute(
       const ProductCommandInvocation& invocation,
       ProductCommandOrigin origin) const;
+  ProductCommandExecutionResult ExecuteGuarded(
+      const ProductCommandInvocation& invocation,
+      ProductCommandOrigin origin,
+      PreExecuteGuard guard) const;
 
  private:
   QueryCallback query_;

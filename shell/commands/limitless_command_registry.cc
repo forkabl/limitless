@@ -208,17 +208,54 @@ ProductCommandQueryResult ProductCommandRegistry::Query(
     return {.status = ProductCommandQueryStatus::kInvalidInvocation,
             .validation = validation};
   }
-  return query_.Run(invocation);
+  QueryCallback query = query_;
+  return query.Run(invocation);
 }
 
 ProductCommandExecutionResult ProductCommandRegistry::Execute(
     const ProductCommandInvocation& invocation,
     ProductCommandOrigin origin) const {
-  const ProductCommandQueryResult query = Query(invocation);
+  QueryCallback query_callback = query_;
+  ExecuteCallback execute_callback = execute_;
+  const ProductCommandValidationStatus validation =
+      ValidateProductCommandInvocation(invocation);
+  if (validation != ProductCommandValidationStatus::kValid) {
+    return {.status = ProductCommandExecutionStatus::kInvalidInvocation,
+            .validation = validation};
+  }
+  const ProductCommandQueryResult query = query_callback.Run(invocation);
   if (query.status != ProductCommandQueryStatus::kEnabled) {
     return ExecutionResultForQuery(query);
   }
-  return execute_.Run(invocation, origin);
+  return execute_callback.Run(invocation, origin);
+}
+
+ProductCommandExecutionResult ProductCommandRegistry::ExecuteGuarded(
+    const ProductCommandInvocation& invocation,
+    ProductCommandOrigin origin,
+    PreExecuteGuard guard) const {
+  CHECK(guard);
+  QueryCallback query_callback = query_;
+  ExecuteCallback execute_callback = execute_;
+  const ProductCommandValidationStatus validation =
+      ValidateProductCommandInvocation(invocation);
+  if (validation != ProductCommandValidationStatus::kValid) {
+    return {.status = ProductCommandExecutionStatus::kInvalidInvocation,
+            .validation = validation};
+  }
+  const ProductCommandQueryResult query = query_callback.Run(invocation);
+  if (query.status != ProductCommandQueryStatus::kEnabled) {
+    return ExecutionResultForQuery(query);
+  }
+  const ProductCommandPreExecuteDecision decision =
+      std::move(guard).Run(invocation);
+  if (decision != ProductCommandPreExecuteDecision::kAllow) {
+    return {.status =
+                decision == ProductCommandPreExecuteDecision::kDeadlineExceeded
+                    ? ProductCommandExecutionStatus::kDeadlineExceeded
+                    : ProductCommandExecutionStatus::kPreconditionFailed};
+  }
+  return execute_callback.Run(invocation, origin);
 }
 
 }  // namespace limitless

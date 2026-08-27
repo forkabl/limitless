@@ -5,10 +5,13 @@
 #include "shell/commands/limitless_command_registry.h"
 
 #include <limits>
+#include <memory>
 #include <set>
 #include <string>
 
 #include "base/functional/bind.h"
+#include "base/test/bind.h"
+#include "shell/commands/limitless_command_window_binding.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace limitless {
@@ -181,6 +184,333 @@ TEST(LimitlessCommandRegistryTest, ExecuteQueriesLiveBeforeEveryDispatch) {
   EXPECT_EQ(2, query_calls);
   EXPECT_EQ(1, execute_calls);
   EXPECT_EQ(ProductCommandOrigin::kLeaderShortcut, last_origin);
+}
+
+TEST(LimitlessCommandRegistryTest,
+     GuardedExecutionQueriesThenGuardsThenExecutes) {
+  std::string order;
+  ProductCommandOrigin seen = ProductCommandOrigin::kNativeUi;
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        order += "q";
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin origin) {
+            order += "e";
+            seen = origin;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kSucceeded,
+      registry
+          .ExecuteGuarded({.command = ProductCommandId::kSidebarToggle},
+                          ProductCommandOrigin::kExternal,
+                          base::BindLambdaForTesting(
+                              [&](const ProductCommandInvocation&) mutable {
+                                order += "g";
+                                return ProductCommandPreExecuteDecision::kAllow;
+                              }))
+          .status);
+  EXPECT_EQ("qge", order);
+  EXPECT_EQ(ProductCommandOrigin::kExternal, seen);
+}
+
+TEST(LimitlessCommandRegistryTest,
+     GuardFailuresReturnExactStatusAndDoNotExecute) {
+  int query_calls = 0;
+  int guard_calls = 0;
+  int execute_calls = 0;
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        ++query_calls;
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++execute_calls;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+
+  const ProductCommandInvocation invocation{
+      .command = ProductCommandId::kSidebarToggle};
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kDeadlineExceeded,
+      registry
+          .ExecuteGuarded(
+              invocation, ProductCommandOrigin::kExternal,
+              base::BindLambdaForTesting(
+                  [&](const ProductCommandInvocation&) mutable {
+                    ++guard_calls;
+                    return ProductCommandPreExecuteDecision::kDeadlineExceeded;
+                  }))
+          .status);
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kPreconditionFailed,
+      registry
+          .ExecuteGuarded(invocation, ProductCommandOrigin::kExternal,
+                          base::BindLambdaForTesting(
+                              [&](const ProductCommandInvocation&) mutable {
+                                ++guard_calls;
+                                return ProductCommandPreExecuteDecision::
+                                    kPreconditionFailed;
+                              }))
+          .status);
+  EXPECT_EQ(2, query_calls);
+  EXPECT_EQ(2, guard_calls);
+  EXPECT_EQ(0, execute_calls);
+}
+
+TEST(LimitlessCommandRegistryTest, DisabledQuerySkipsGuardAndExecution) {
+  int query_calls = 0;
+  int guard_calls = 0;
+  int execute_calls = 0;
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        ++query_calls;
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kDisabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++execute_calls;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kDisabled,
+      registry
+          .ExecuteGuarded({.command = ProductCommandId::kSidebarToggle},
+                          ProductCommandOrigin::kExternal,
+                          base::BindLambdaForTesting(
+                              [&](const ProductCommandInvocation&) mutable {
+                                ++guard_calls;
+                                return ProductCommandPreExecuteDecision::kAllow;
+                              }))
+          .status);
+  EXPECT_EQ(1, query_calls);
+  EXPECT_EQ(0, guard_calls);
+  EXPECT_EQ(0, execute_calls);
+}
+
+TEST(LimitlessCommandRegistryTest,
+     InvalidInvocationSkipsQueryGuardAndExecution) {
+  int query_calls = 0;
+  int guard_calls = 0;
+  int execute_calls = 0;
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        ++query_calls;
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++execute_calls;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kInvalidInvocation,
+      registry
+          .ExecuteGuarded({.command = ProductCommandId::kTabsSelectIndex,
+                           .arguments = ProductCommandNoArguments{}},
+                          ProductCommandOrigin::kExternal,
+                          base::BindLambdaForTesting(
+                              [&](const ProductCommandInvocation&) mutable {
+                                ++guard_calls;
+                                return ProductCommandPreExecuteDecision::kAllow;
+                              }))
+          .status);
+  EXPECT_EQ(0, query_calls);
+  EXPECT_EQ(0, guard_calls);
+  EXPECT_EQ(0, execute_calls);
+}
+
+TEST(LimitlessCommandRegistryTest,
+     GuardedExecutionSurvivesOwnerDestructionDuringQuery) {
+  int guard_calls = 0;
+  int execute_calls = 0;
+  std::unique_ptr<ProductCommandRegistry> registry;
+  registry = std::make_unique<ProductCommandRegistry>(
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        registry.reset();
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++execute_calls;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+
+  EXPECT_EQ(ProductCommandExecutionStatus::kSucceeded,
+            registry
+                ->ExecuteGuarded(
+                    {.command = ProductCommandId::kSidebarToggle},
+                    ProductCommandOrigin::kExternal,
+                    base::BindLambdaForTesting(
+                        [&](const ProductCommandInvocation&) mutable {
+                          ++guard_calls;
+                          return ProductCommandPreExecuteDecision::kAllow;
+                        }))
+                .status);
+  EXPECT_FALSE(registry);
+  EXPECT_EQ(1, guard_calls);
+  EXPECT_EQ(1, execute_calls);
+}
+
+TEST(LimitlessCommandRegistryTest,
+     GuardedExecutionSurvivesOwnerDestructionDuringGuard) {
+  int execute_calls = 0;
+  std::unique_ptr<ProductCommandRegistry> registry;
+  registry = std::make_unique<ProductCommandRegistry>(
+      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++execute_calls;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+
+  EXPECT_EQ(ProductCommandExecutionStatus::kSucceeded,
+            registry
+                ->ExecuteGuarded(
+                    {.command = ProductCommandId::kSidebarToggle},
+                    ProductCommandOrigin::kExternal,
+                    base::BindLambdaForTesting(
+                        [&](const ProductCommandInvocation&) mutable {
+                          registry.reset();
+                          return ProductCommandPreExecuteDecision::kAllow;
+                        }))
+                .status);
+  EXPECT_FALSE(registry);
+  EXPECT_EQ(1, execute_calls);
+}
+
+TEST(ProductCommandWindowBindingTest, ReturnsAbsentWindowState) {
+  int state_calls = 0;
+  ProductCommandWindowBinding binding(
+      base::BindLambdaForTesting(
+          [&]() -> std::optional<ProductCommandWindowState> {
+            ++state_calls;
+            return std::nullopt;
+          }),
+      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kDisabled};
+      }),
+      base::BindLambdaForTesting(
+          [](const ProductCommandInvocation&, ProductCommandOrigin) {
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+  EXPECT_FALSE(binding.GetState());
+  EXPECT_EQ(1, state_calls);
+}
+
+TEST(ProductCommandWindowBindingTest, DelegatesGuardedExecution) {
+  std::string order;
+  ProductCommandOrigin seen = ProductCommandOrigin::kNativeUi;
+  ProductCommandWindowBinding binding(
+      base::BindLambdaForTesting(
+          []() -> std::optional<ProductCommandWindowState> {
+            return ProductCommandWindowState{.window_id = kWindowId};
+          }),
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        order += "q";
+        return ProductCommandQueryResult{
+            .status = ProductCommandQueryStatus::kEnabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin origin) {
+            order += "e";
+            seen = origin;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kSucceeded,
+      binding
+          .ExecuteGuarded({.command = ProductCommandId::kSidebarToggle},
+                          ProductCommandOrigin::kExternal,
+                          base::BindLambdaForTesting(
+                              [&](const ProductCommandInvocation&) mutable {
+                                order += "g";
+                                return ProductCommandPreExecuteDecision::kAllow;
+                              }))
+          .status);
+  EXPECT_EQ("qge", order);
+  EXPECT_EQ(ProductCommandOrigin::kExternal, seen);
+}
+
+TEST(ProductCommandWindowBindingTest, WeakPointerInvalidatesAfterDestruction) {
+  base::WeakPtr<ProductCommandWindowBinding> weak;
+  {
+    auto binding = std::make_unique<ProductCommandWindowBinding>(
+        base::BindLambdaForTesting(
+            []() -> std::optional<ProductCommandWindowState> {
+              return ProductCommandWindowState{.window_id = kWindowId};
+            }),
+        base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+          return ProductCommandQueryResult{
+              .status = ProductCommandQueryStatus::kDisabled};
+        }),
+        base::BindLambdaForTesting(
+            [](const ProductCommandInvocation&, ProductCommandOrigin) {
+              return ProductCommandExecutionResult{
+                  .status = ProductCommandExecutionStatus::kSucceeded};
+            }));
+    weak = binding->GetWeakPtr();
+    EXPECT_TRUE(weak);
+  }
+  EXPECT_FALSE(weak);
+}
+
+TEST(LimitlessCommandRegistryTest, LiveRequeryRejectsChangedState) {
+  bool enabled = true;
+  int guards = 0;
+  int executes = 0;
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{
+            .status = enabled ? ProductCommandQueryStatus::kEnabled
+                              : ProductCommandQueryStatus::kDisabled};
+      }),
+      base::BindLambdaForTesting(
+          [&](const ProductCommandInvocation&, ProductCommandOrigin) {
+            ++executes;
+            return ProductCommandExecutionResult{
+                .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+  EXPECT_EQ(
+      ProductCommandQueryStatus::kEnabled,
+      registry.Query({.command = ProductCommandId::kSidebarToggle}).status);
+  enabled = false;
+  EXPECT_EQ(
+      ProductCommandExecutionStatus::kDisabled,
+      registry
+          .ExecuteGuarded({.command = ProductCommandId::kSidebarToggle},
+                          ProductCommandOrigin::kExternal,
+                          base::BindLambdaForTesting(
+                              [&](const ProductCommandInvocation&) mutable {
+                                ++guards;
+                                return ProductCommandPreExecuteDecision::kAllow;
+                              }))
+          .status);
+  EXPECT_EQ(0, guards);
+  EXPECT_EQ(0, executes);
 }
 
 }  // namespace

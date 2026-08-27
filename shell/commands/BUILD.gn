@@ -2,12 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+config("command_registry_public") {
+  include_dirs = [ "../.." ]
+}
+
 source_set("command_registry") {
   sources = [
     "limitless_command_registry.cc",
     "limitless_command_registry.h",
+    "limitless_command_window_binding.cc",
+    "limitless_command_window_binding.h",
   ]
 
+  public_configs = [ ":command_registry_public" ]
   public_deps = [ "//base" ]
 }
 
@@ -17,6 +24,7 @@ source_set("command_registry_tests") {
 
   deps = [
     ":command_registry",
+    "//base/test:test_support",
     "//testing/gtest",
   ]
 }
