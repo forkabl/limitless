@@ -88,7 +88,19 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise ControlError("invalid_descriptor")
     socket_path = Path(value["socket_path"])
-    if socket_path.parent != runtime or socket_path.suffix != ".sock":
+    local_socket_name = (
+        f"limitless-{os.geteuid()}-{pid}-"
+        f'{value["profile_id"][:8]}-{value["instance_id"][:8]}.sock'
+    )
+    socket_in_runtime = (
+        socket_path.parent == runtime
+        and socket_path.name
+        == f'{value["profile_id"][:8]}-{value["instance_id"][:8]}.sock'
+    )
+    socket_in_short_fallback = (
+        socket_path.parent == Path("/tmp") and socket_path.name == local_socket_name
+    )
+    if not socket_in_runtime and not socket_in_short_fallback:
         raise ControlError("invalid_descriptor")
     socket_metadata = _safe_file(socket_path, 0o600)
     if not stat.S_ISSOCK(socket_metadata.st_mode):

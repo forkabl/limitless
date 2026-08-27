@@ -19,7 +19,6 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
-#include <cstring>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -55,9 +54,7 @@ bool ConfigureIoDeadline(int fd, base::TimeTicks deadline) {
              0;
 }
 
-bool ReadExactly(int fd,
-                 base::span<uint8_t> output,
-                 base::TimeTicks deadline) {
+bool ReadExactly(int fd, base::span<uint8_t> output, base::TimeTicks deadline) {
   while (!output.empty()) {
     if (!ConfigureIoDeadline(fd, deadline)) {
       return false;
@@ -214,7 +211,14 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
       runtime_directory_.AppendASCII(profile + "." + instance + ".token");
   sockaddr_un address = {};
   if (socket_path_.value().size() >= sizeof(address.sun_path)) {
-    return PreferenceControlTransportStartStatus::kPathTooLong;
+    const std::string short_endpoint =
+        "limitless-" + std::to_string(geteuid()) + "-" +
+        std::to_string(base::GetCurrentProcId()) + "-" + endpoint_name +
+        ".sock";
+    socket_path_ = base::FilePath("/tmp").AppendASCII(short_endpoint);
+    if (socket_path_.value().size() >= sizeof(address.sun_path)) {
+      return PreferenceControlTransportStartStatus::kPathTooLong;
+    }
   }
 
   base::ScopedFD listen_fd(socket(AF_UNIX, SOCK_STREAM, 0));
@@ -291,7 +295,9 @@ void PreferenceControlTransport::Stop() {
   stopping_.store(true, std::memory_order_release);
   if (cancellation_fd_.is_valid()) {
     const char cancellation = 0;
-    write(cancellation_fd_.get(), &cancellation, sizeof(cancellation));
+    const ssize_t write_result =
+        write(cancellation_fd_.get(), &cancellation, sizeof(cancellation));
+    static_cast<void>(write_result);
   }
   {
     std::lock_guard lock(accepted_connection_mutex_);
@@ -396,8 +402,8 @@ void PreferenceControlTransport::AcceptLoop(
         base::TimeTicks::Now() + kTransportIoTimeout;
 
     uint32_t network_size = 0;
-    if (!ReadExactly(connection.get(),
-                     base::byte_span_from_ref(network_size), deadline)) {
+    if (!ReadExactly(connection.get(), base::byte_span_from_ref(network_size),
+                     deadline)) {
       continue;
     }
     const size_t payload_size = ntohl(network_size);

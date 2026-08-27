@@ -90,10 +90,7 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        DripFeedCannotExtendAbsoluteFrameDeadline) {
   base::ScopedAllowBlockingForTesting allow_blocking;
   base::ScopedTempDir user_data_directory;
-  {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
-  }
+  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
   ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
@@ -114,10 +111,7 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        StopCancelsAcceptedPartialFrameAndCleansEndpoint) {
   base::ScopedAllowBlockingForTesting allow_blocking;
   base::ScopedTempDir user_data_directory;
-  {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
-  }
+  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
   ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
@@ -147,10 +141,7 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        StopCancelsIdleAcceptWithoutWaitingForIoDeadline) {
   base::ScopedAllowBlockingForTesting allow_blocking;
   base::ScopedTempDir user_data_directory;
-  {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
-  }
+  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
   ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
