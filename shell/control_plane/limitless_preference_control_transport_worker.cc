@@ -158,13 +158,19 @@ PreferenceControlTransportWorker::Prepare() {
   }
   if (bind(listener_.get(), reinterpret_cast<sockaddr*>(&address),
            offsetof(sockaddr_un, sun_path) +
-               inputs_.socket_path.value().size() + 1) != 0 ||
-      chmod(inputs_.socket_path.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
-      listen(listener_.get(), 4) != 0) {
+               inputs_.socket_path.value().size() + 1) != 0) {
+    result.status = WorkerPrepareStatus::kSocket;
     Cleanup();
     return result;
   }
   owns_socket_ = true;
+  if (inputs_.force_post_bind_failure ||
+      chmod(inputs_.socket_path.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
+      listen(listener_.get(), 4) != 0) {
+    result.status = WorkerPrepareStatus::kSocket;
+    Cleanup();
+    return result;
+  }
   // Establish cancellation before publishing any endpoint artifacts.
   int pipe_fds[2];
   if (pipe(pipe_fds) != 0) {

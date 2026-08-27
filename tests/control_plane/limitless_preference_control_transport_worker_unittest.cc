@@ -154,6 +154,20 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   EXPECT_FALSE(base::PathExists(in.credential_path));
 }
 TEST(LimitlessPreferenceControlTransportWorkerTest,
+     PostBindFailureRollsBackOwnedSocket) {
+  base::test::TaskEnvironment env;
+  base::ScopedTempDir t;
+  ASSERT_TRUE(t.CreateUniqueTempDir());
+  auto in = Inputs(t.GetPath());
+  in.force_post_bind_failure = true;
+  Evidence e = RunWorker(in, base::MakeRefCounted<TransportCancellationState>());
+  EXPECT_EQ(e.result.status,
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kSocket);
+  EXPECT_FALSE(base::PathExists(in.socket_path));
+  EXPECT_FALSE(base::PathExists(in.credential_path));
+  EXPECT_FALSE(base::PathExists(in.descriptor_path));
+}
+TEST(LimitlessPreferenceControlTransportWorkerTest,
      CleanupIsIdempotentAndForeignFilesSurvive) {
   base::test::TaskEnvironment env;
   base::ScopedTempDir t;

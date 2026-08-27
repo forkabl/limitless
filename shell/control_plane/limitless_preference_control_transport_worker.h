@@ -38,6 +38,7 @@ class PreferenceControlTransportWorker {
     std::string profile_id;
     std::string instance_id;
     std::string capability;
+    bool force_post_bind_failure = false;
   };
   enum class WorkerPrepareStatus { kSuccess, kCancelled, kRuntimeDirectory,
                                    kCollision, kSocket, kCredential, kDescriptor,
