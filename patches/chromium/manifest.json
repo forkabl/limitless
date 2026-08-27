@@ -374,6 +374,28 @@
         "Chromium adds an equivalent supported predicate for actual horizontal tab-overlay eligibility."
       ],
       "removal_condition": "Remove this patch when Chromium's macOS immersive controller natively distinguishes a tab-capable window from one with an initialized horizontal tab view and skips separate-tab-overlay entry, resize, and exit work when that view is absent."
+    },
+    {
+      "file": "0013-profile-pref-registration.patch",
+      "sha256": "3475a3b0d0570688993254da8e6be5f0890ef2db5d9ab57e73d38609be1609f4",
+      "upstream_files": [
+        "chrome/browser/prefs/BUILD.gn",
+        "chrome/browser/prefs/browser_prefs.cc"
+      ],
+      "upstream_symbols": [
+        "source_set(\"impl\")",
+        "RegisterUserProfilePrefs"
+      ],
+      "limitless_targets": [
+        "$limitless_root/shell/control_plane:profile_prefs"
+      ],
+      "tests": [
+        "//chrome/test:browser_tests --gtest_filter=LimitlessProfilePrefsBrowserTest.RegistersRailDensityAsNonSyncProfilePref"
+      ],
+      "conflict_signals": [
+        "Chromium profile preference registration moves or gains an equivalent product hook."
+      ],
+      "removal_condition": "Remove when Chromium exposes a supported product profile preference registration seam."
     }
   ]
 }

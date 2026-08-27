@@ -677,6 +677,16 @@ The disabled Linux compositor pixel test remains a future portability warning, n
 
 ## Patch growth stop conditions
 
+### 0013: profile preference registration
+
+This patch adds the narrow `RegisterUserProfilePrefs` hook and the `impl`
+source-set dependency needed to register Limitless's non-sync rail-density
+preference. It touches only `chrome/browser/prefs/BUILD.gn` and
+`chrome/browser/prefs/browser_prefs.cc`. The focused registration, adapter,
+retention, and corruption tests cover the seam. Remove it when Chromium offers
+a supported product profile-preference registration hook; conflicts are
+expected if either registration symbol or source-set dependency moves.
+
 Stop and reconsider the conditional hybrid if any of these occurs:
 
 - more than the expected six-file WebUI production surface, including the shared file for the independent handler fixes while required, must be patched before feature completeness work begins;

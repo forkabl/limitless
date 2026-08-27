@@ -113,6 +113,20 @@ private enum LimitlessLeaderStatusText {
     "\(visible). Press Escape to cancel. Leader mode automatically cancels within two seconds."
 }
 
+private enum LimitlessRailDensity: String {
+  case compact
+  case comfortable
+
+  var tabRowHeight: CGFloat {
+    switch self {
+    case .compact:
+      return 28
+    case .comfortable:
+      return 34
+    }
+  }
+}
+
 private enum LimitlessLayoutProbeRole: Hashable {
   case workspaceHeader
   case workspaceCreateControl
@@ -120,6 +134,7 @@ private enum LimitlessLayoutProbeRole: Hashable {
   case workspaceSwitcherContent
   case workspaceViewport
   case workspaceContent
+  case firstTabRow
   case agentViewport
   case agentContent
 }
@@ -178,6 +193,7 @@ private final class LimitlessTabRailModel: ObservableObject {
   @Published private(set) var agentSourceState: LimitlessAgentSourceState = .loading
   @Published private(set) var leaderEnabled = false
   @Published private(set) var leaderArmed = false
+  @Published private(set) var railDensity = LimitlessRailDensity.compact
 
   var leaderStatusText: String {
     leaderArmed ? LimitlessLeaderStatusText.visible : ""
@@ -399,6 +415,15 @@ private final class LimitlessTabRailModel: ObservableObject {
     leaderEnabled = enabled
     leaderArmed = enabled && armed
   }
+
+  @discardableResult
+  func replaceRailDensity(_ value: String) -> Bool {
+    guard let density = LimitlessRailDensity(rawValue: value) else {
+      return false
+    }
+    railDensity = density
+    return true
+  }
 }
 
 private struct LimitlessLeaderStatus: View {
@@ -579,6 +604,9 @@ private struct LimitlessTabRow: View {
   let createSplit: (String, String, String) -> Bool
   let focusSplit: (String, String, String, String) -> Bool
   let splitEligibility: (String, String, [String]) -> [String: String]
+  let density: LimitlessRailDensity
+  let layoutProbeStore: LimitlessLayoutProbeStore
+  let isFirstRow: Bool
 
   @State private var isHovering = false
 
@@ -713,7 +741,7 @@ private struct LimitlessTabRow: View {
     }
     .padding(.leading, 8)
     .padding(.trailing, 4)
-    .frame(height: 30)
+    .frame(height: density.tabRowHeight)
     .background(alignment: .leading) {
       Rectangle()
         .fill(rowBackground)
@@ -721,6 +749,12 @@ private struct LimitlessTabRow: View {
         Rectangle()
           .fill(Color.accentColor)
           .frame(width: 2, height: 18)
+      }
+      if isFirstRow {
+        GeometryReader { geometry in
+          LimitlessViewportProbe(role: .firstTabRow, store: layoutProbeStore)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
       }
     }
     .onHover { isHovering = $0 }
@@ -1173,7 +1207,10 @@ private struct LimitlessSwiftUITabRail: View {
                 move: moveTab,
                 createSplit: createSplit,
                 focusSplit: focusSplit,
-                splitEligibility: splitEligibility)
+                splitEligibility: splitEligibility,
+                density: model.railDensity,
+                layoutProbeStore: layoutProbeStore,
+                isFirstRow: index == 0)
             }
           }
           .background {
@@ -1373,6 +1410,20 @@ public final class LimitlessSwiftUITabRailView: NSView {
   @objc(updateLeaderEnabled:armed:)
   public func updateLeader(enabled: Bool, armed: Bool) {
     model.replaceLeader(enabled: enabled, armed: armed)
+  }
+
+  @objc(updateRailDensity:)
+  @discardableResult
+  public func updateRailDensity(_ value: String) -> Bool {
+    model.replaceRailDensity(value)
+  }
+
+  @objc public var railDensityForTesting: String {
+    model.railDensity.rawValue
+  }
+
+  @objc public var firstTabRowFrameForTesting: NSRect {
+    layoutProbeFrame(for: .firstTabRow)
   }
 
   @objc public var tabIdentifiersForTesting: [NSNumber] {

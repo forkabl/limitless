@@ -12,6 +12,12 @@ group("resources") {
   public_deps = [ "../../shell/resources" ]
 }
 
+# Chromium's profile registry reaches the product-owned preference definitions
+# through one optional dependency edge.
+group("profile_prefs") {
+  public_deps = [ "../../shell/control_plane:profile_prefs" ]
+}
+
 # Gate 2B compiles the product-owned SwiftUI boundary probe through Chromium's
 # normal Apple build graph.
 group("swiftui_rail") {
@@ -51,13 +57,20 @@ source_set("swiftui_browser_tests") {
   frameworks = [ "AppKit.framework" ]
 
   sources = [
+    "../../tests/browser/limitless_control_plane_browsertest.cc",
+    "../../tests/browser/limitless_profile_preference_backend_browsertest.cc",
     "../../tests/browser/limitless_split_pane_controller_browsertest.cc",
     "../../tests/browser/limitless_swiftui_browsertest.mm",
+    "../../tests/commands/limitless_command_registry_unittest.cc",
   ]
 
   deps = [
     "../../shell/agents:agent_presence",
     "../../shell/agents:agent_presence_tests",
+    "../../shell/commands:command_registry",
+    "../../shell/control_plane:preference_control",
+    "../../shell/control_plane:profile_preference_backend",
+    "../../shell/control_plane:profile_prefs",
     "../../shell/native/swiftui_rail:rail",
     "../../shell/splits:core",
     "../../shell/workspaces:core",

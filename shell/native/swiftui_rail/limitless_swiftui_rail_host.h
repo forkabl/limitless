@@ -60,6 +60,8 @@ MaybeCreateLeaderCommandDispatcherDelegateForWindow(
 int GetSwiftUIBoundaryProbeAttachedHostCountForTesting();
 
 struct SwiftUITabRailSnapshotForTesting {
+  std::string rail_density;
+  double first_tab_row_height = 0;
   bool workspaces_enabled = false;
   std::string window_identifier;
   std::vector<std::string> workspace_identifiers;
@@ -158,6 +160,11 @@ bool MoveSwiftUITabToWorkspaceForTesting(
     int32_t tab_identifier,
     const std::string& workspace_identifier);
 bool SimulateMissingSwiftUIProductIdentityMappingForTesting(views::View* rail);
+// Updates only the product-owned SwiftUI appearance model. This test seam
+// exercises the same typed native bridge used by the profile preference
+// adapter and never mutates Chromium tab or page state.
+bool UpdateSwiftUIRailDensityForTesting(views::View* rail,
+                                        const std::string& rail_density);
 std::optional<SwiftUIAgentRailSnapshotForTesting>
 GetSwiftUIAgentRailSnapshotForTesting(views::View* rail);
 // These helpers traverse and invoke the actual native SwiftUI accessibility

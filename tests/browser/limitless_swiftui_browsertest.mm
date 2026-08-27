@@ -86,6 +86,7 @@
 #include "components/javascript_dialogs/app_modal_dialog_queue.h"
 #include "components/javascript_dialogs/app_modal_dialog_view.h"
 #include "components/javascript_dialogs/tab_modal_dialog_manager.h"
+#include "components/prefs/pref_service.h"
 #include "components/sessions/content/session_tab_helper.h"
 #include "components/sessions/core/session_id.h"
 #include "components/tabs/public/split_tab_data.h"
@@ -101,6 +102,7 @@
 #include "content/public/common/result_codes.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "limitless_profile_preference_backend.h"
 #include "limitless_split_pane_controller.h"
 #include "limitless_swiftui_rail_host.h"
 #include "limitless_workspace_controller.h"
@@ -850,6 +852,59 @@ IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
   EXPECT_EQ(host->height(), NSHeight(native_view.frame));
   EXPECT_GE(browser_view->multi_contents_view()->x(), host->bounds().right());
   EXPECT_EQ(1, limitless::GetSwiftUIBoundaryProbeAttachedHostCountForTesting());
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    ProfileRailDensityUpdatesLiveGeometryWithoutRecreatingAuthoritativePage) {
+  BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser());
+  ASSERT_TRUE(browser_view);
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+
+  const auto initial = WaitForRailTabs(rail, 1);
+  ASSERT_TRUE(initial);
+  content::WebContents* const authoritative_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+  ASSERT_TRUE(authoritative_contents);
+  const std::vector<int32_t> tab_identifiers = initial->tab_identifiers;
+  const std::vector<std::string> product_identifiers =
+      initial->tab_product_identifiers;
+  const std::optional<int32_t> active_identifier =
+      initial->active_tab_identifier;
+
+  std::optional<limitless::SwiftUITabRailSnapshotForTesting> compact;
+  ASSERT_TRUE(base::test::RunUntil([&]() {
+    compact = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    return compact && compact->rail_density == "compact" &&
+           compact->first_tab_row_height == 28;
+  }));
+
+  browser()->GetProfile()->GetPrefs()->SetString(
+      limitless::kRailDensityPref, "comfortable");
+  std::optional<limitless::SwiftUITabRailSnapshotForTesting> comfortable;
+  ASSERT_TRUE(base::test::RunUntil([&]() {
+    comfortable = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    return comfortable && comfortable->rail_density == "comfortable" &&
+           comfortable->first_tab_row_height == 34;
+  }));
+  ASSERT_TRUE(comfortable);
+  EXPECT_GT(comfortable->first_tab_row_height, compact->first_tab_row_height);
+  EXPECT_EQ(tab_identifiers, comfortable->tab_identifiers);
+  EXPECT_EQ(product_identifiers, comfortable->tab_product_identifiers);
+  EXPECT_EQ(active_identifier, comfortable->active_tab_identifier);
+  EXPECT_EQ(authoritative_contents,
+            browser()->tab_strip_model()->GetActiveWebContents());
+
+  EXPECT_FALSE(
+      limitless::UpdateSwiftUIRailDensityForTesting(rail, "oversized"));
+  const auto after_invalid =
+      limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+  ASSERT_TRUE(after_invalid);
+  EXPECT_EQ("comfortable", after_invalid->rail_density);
+  EXPECT_DOUBLE_EQ(34, after_invalid->first_tab_row_height);
+  EXPECT_EQ(authoritative_contents,
+            browser()->tab_strip_model()->GetActiveWebContents());
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
