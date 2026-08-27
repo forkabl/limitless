@@ -72,6 +72,7 @@ class PreferenceControlTransport {
   void OnPrepared(uint64_t, PreferenceControlTransportWorker::PrepareResult);
   void OnRunExited(uint64_t generation);
   void OnStopped(uint64_t);
+  void ReleaseWorkerThread();
   void HandleRequestOnOrigin(std::string,
                              base::TimeTicks,
                              scoped_refptr<PendingRequest>);
@@ -79,7 +80,8 @@ class PreferenceControlTransport {
   const base::FilePath runtime_directory_;
   const scoped_refptr<base::SequencedTaskRunner> origin_task_runner_;
   base::FilePath descriptor_path_, credential_path_, socket_path_;
-  std::unique_ptr<base::Thread> worker_thread_;
+  const scoped_refptr<base::SequencedTaskRunner> cleanup_task_runner_;
+  std::unique_ptr<base::Thread, base::OnTaskRunnerDeleter> worker_thread_;
   base::SequenceBound<PreferenceControlTransportWorker> worker_;
   scoped_refptr<TransportCancellationState> cancellation_;
   State state_ = State::kStopped;

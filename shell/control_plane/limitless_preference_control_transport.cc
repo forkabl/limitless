@@ -5,6 +5,7 @@
 #include "limitless_preference_control_transport.h"
 
 #include "base/functional/bind.h"
+#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "limitless_preference_control_protocol.h"
 #include "limitless_preference_control_service.h"
@@ -18,6 +19,10 @@ PreferenceControlTransport::PreferenceControlTransport(
       runtime_directory_(
           user_data_directory.AppendASCII(kPreferenceControlRuntimeDirectory)),
       origin_task_runner_(base::SequencedTaskRunner::GetCurrentDefault()),
+      cleanup_task_runner_(base::ThreadPool::CreateSequencedTaskRunner(
+          {base::MayBlock(), base::WithBaseSyncPrimitives(),
+           base::TaskShutdownBehavior::BLOCK_SHUTDOWN})),
+      worker_thread_(nullptr, base::OnTaskRunnerDeleter(cleanup_task_runner_)),
       cancellation_(base::MakeRefCounted<TransportCancellationState>()) {
   CHECK(backend_);
   CHECK(origin_task_runner_);
@@ -25,6 +30,15 @@ PreferenceControlTransport::PreferenceControlTransport(
 
 PreferenceControlTransport::~PreferenceControlTransport() {
   Stop();
+  worker_.Reset();
+  ReleaseWorkerThread();
+}
+
+void PreferenceControlTransport::ReleaseWorkerThread() {
+  if (worker_thread_) {
+    worker_thread_->DetachFromSequence();
+    worker_thread_.reset();
+  }
 }
 
 void PreferenceControlTransport::SetTestingHooksForTesting(TestingHooks hooks) {
@@ -80,13 +94,13 @@ void PreferenceControlTransport::StartAsync(StartCallback callback) {
   inputs.entering_accept_wait_for_testing = testing_hooks_.entering_accept_wait;
   inputs.should_exit_run_for_testing = testing_hooks_.should_exit_run;
   if (!worker_thread_) {
-    worker_thread_ =
-        std::make_unique<base::Thread>("LimitlessPreferenceControlTransport");
+    worker_thread_.reset(
+        new base::Thread("LimitlessPreferenceControlTransport"));
     const bool allowed = !testing_hooks_.allow_thread_start_for_testing ||
                          testing_hooks_.allow_thread_start_for_testing.Run();
     const bool started = allowed && worker_thread_->Start();
     if (!started) {
-      worker_thread_.reset();
+      ReleaseWorkerThread();
       state_ = State::kStopped;
       origin_task_runner_->PostTask(
           FROM_HERE,

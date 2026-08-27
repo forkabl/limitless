@@ -24,6 +24,7 @@
 #include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
 #include "base/test/run_until.h"
+#include "base/test/scoped_run_loop_timeout.h"
 #include "base/test/test_future.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/scoped_blocking_call.h"
@@ -396,12 +397,18 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   const auto socket = transport->socket_path();
   const auto token = transport->credential_path();
   const auto descriptor = transport->descriptor_path();
-  base::ElapsedTimer elapsed;
-  transport.reset();
-  EXPECT_LT(elapsed.Elapsed(), base::Seconds(1));
-  EXPECT_FALSE(base::PathExists(socket));
-  EXPECT_FALSE(base::PathExists(token));
-  EXPECT_FALSE(base::PathExists(descriptor));
+  ASSERT_TRUE(base::PathExists(socket));
+  ASSERT_TRUE(base::PathExists(token));
+  ASSERT_TRUE(base::PathExists(descriptor));
+  {
+    base::ScopedDisallowBaseSyncPrimitives disallow_sync;
+    transport.reset();
+  }
+  base::test::ScopedRunLoopTimeout timeout(FROM_HERE, base::Seconds(10));
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return !base::PathExists(socket) && !base::PathExists(token) &&
+           !base::PathExists(descriptor);
+  }));
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
@@ -426,12 +433,18 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   const char byte = 0;
   ASSERT_EQ(1, send(connection.get(), &byte, 1, MSG_NOSIGNAL));
   ASSERT_TRUE(accepted.Wait());
-  base::ElapsedTimer elapsed;
-  transport.reset();
-  EXPECT_LT(elapsed.Elapsed(), base::Seconds(1));
-  EXPECT_FALSE(base::PathExists(socket));
-  EXPECT_FALSE(base::PathExists(token));
-  EXPECT_FALSE(base::PathExists(descriptor));
+  ASSERT_TRUE(base::PathExists(socket));
+  ASSERT_TRUE(base::PathExists(token));
+  ASSERT_TRUE(base::PathExists(descriptor));
+  {
+    base::ScopedDisallowBaseSyncPrimitives disallow_sync;
+    transport.reset();
+  }
+  base::test::ScopedRunLoopTimeout timeout(FROM_HERE, base::Seconds(10));
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return !base::PathExists(socket) && !base::PathExists(token) &&
+           !base::PathExists(descriptor);
+  }));
 }
 
 }  // namespace
