@@ -22,7 +22,7 @@ struct TransportCancellationState
   void ClearWriter();
   std::atomic<bool> cancelled{false};
   base::Lock lock;
-  int writer_fd = -1;
+  base::ScopedFD writer_fd;
  private:
   friend class base::RefCountedThreadSafe<TransportCancellationState>;
   ~TransportCancellationState();
