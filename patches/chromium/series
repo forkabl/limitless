@@ -8,3 +8,5 @@
 0008-session-split-visual-data-validation.patch
 0009-tab-strip-editability-lifecycle.patch
 0010-webui-browser-split-test-wiring.patch
+0011-macos-modal-dialog-reactivation.patch
+0012-macos-immersive-tab-overlay-safety.patch

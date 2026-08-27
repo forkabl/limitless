@@ -145,6 +145,7 @@ class WorkspaceController final : public TabListInterfaceObserver {
 
   BrowserWindowInterface* browser_window() const { return browser_window_; }
   Profile* profile() const;
+  base::WeakPtr<WorkspaceController> GetWeakPtr();
 
   static WorkspaceController* From(BrowserWindowInterface* browser_window);
 
@@ -212,8 +213,6 @@ class WorkspaceController final : public TabListInterfaceObserver {
   void SchedulePublish();
   void PublishNow();
   bool ShouldPublish() const;
-  base::WeakPtr<WorkspaceController> GetWeakPtrForSessionRestore();
-
   bool enabled_ = false;
   bool closing_all_ = false;
   bool stopped_ = false;

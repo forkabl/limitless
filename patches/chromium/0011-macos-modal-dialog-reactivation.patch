@@ -1,0 +1,15 @@
+diff --git a/components/constrained_window/native_web_contents_modal_dialog_manager_views.cc b/components/constrained_window/native_web_contents_modal_dialog_manager_views.cc
+index f989d38c439dc3d4c38d1f15bcd2ad13bc2206b2..474aa328897d3ec47d0229b11d6dcf466282fa4e 100644
+--- a/components/constrained_window/native_web_contents_modal_dialog_manager_views.cc
++++ b/components/constrained_window/native_web_contents_modal_dialog_manager_views.cc
+@@ -146,6 +146,10 @@ void NativeWebContentsModalDialogManagerViews::Focus() {
+   // We don't necessarily have a RootWindow yet.
+   if (widget->GetNativeView()->GetRootWindow())
+     widget->GetNativeView()->Focus();
++#else
++  // Requesting Views focus does not make a macOS child dialog key again after
++  // its parent window has been activated.
++  widget->Activate();
+ #endif
+ }
+ 

@@ -437,7 +437,9 @@ def _require_string(value: object, context: str) -> str:
     return value
 
 
-def _decode_png_dimensions(png: bytes) -> tuple[int, int]:
+def _decode_png_dimensions(
+    png: bytes, *, require_nontransparent: bool = False
+) -> tuple[int, int]:
     if not png.startswith(PNG_SIGNATURE):
         raise RuntimeError("Page.captureScreenshot did not return a PNG")
 
@@ -539,6 +541,7 @@ def _decode_png_dimensions(png: bytes) -> tuple[int, int]:
         raise RuntimeError("Page.captureScreenshot returned invalid PNG dimensions")
 
     previous = bytearray(stride)
+    saw_nontransparent_pixel = not require_nontransparent
     cursor = 0
     for _ in range(height):
         filter_type = filtered[cursor]
@@ -577,7 +580,32 @@ def _decode_png_dimensions(png: bytes) -> tuple[int, int]:
                     else upper_left
                 )
             decoded_row[index] = (encoded_byte + predictor) & 0xFF
+        if require_nontransparent and not saw_nontransparent_pixel:
+            if color_type == 6 and bit_depth == 8:
+                saw_nontransparent_pixel = any(decoded_row[3::4])
+            elif color_type == 6 and bit_depth == 16:
+                saw_nontransparent_pixel = any(
+                    decoded_row[index]
+                    for index in range(6, len(decoded_row), 8)
+                ) or any(
+                    decoded_row[index]
+                    for index in range(7, len(decoded_row), 8)
+                )
+            elif color_type == 4 and bit_depth == 8:
+                saw_nontransparent_pixel = any(decoded_row[1::2])
+            elif color_type == 4 and bit_depth == 16:
+                saw_nontransparent_pixel = any(
+                    decoded_row[index]
+                    for index in range(2, len(decoded_row), 4)
+                ) or any(
+                    decoded_row[index]
+                    for index in range(3, len(decoded_row), 4)
+                )
+            else:
+                saw_nontransparent_pixel = True
         previous = decoded_row
+    if not saw_nontransparent_pixel:
+        raise RuntimeError("Page.captureScreenshot returned a fully transparent PNG")
     return width, height
 
 

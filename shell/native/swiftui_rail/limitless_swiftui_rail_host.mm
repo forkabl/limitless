@@ -1398,7 +1398,9 @@ SwiftUITabRailHost* FindHost(BrowserWindowInterface* browser_window) {
 
 std::unique_ptr<views::View> MaybeCreateSwiftUITabRail(
     BrowserWindowInterface* browser_window) {
-  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
+  if (!browser_window ||
+      browser_window->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
+      !base::CommandLine::ForCurrentProcess()->HasSwitch(
           kSwiftUIBoundaryProbeSwitch)) {
     return nullptr;
   }

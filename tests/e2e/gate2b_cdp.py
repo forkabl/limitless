@@ -25,7 +25,6 @@ FOCUS_IDENTIFIER_PREFIX = "limitless-tab-"
 TAB_CLOSE_IDENTIFIER_PREFIX = "limitless-tab-close-"
 EXPECTED_RAIL_WIDTH = 216.0
 BOUNDS_TOLERANCE = 2.0
-PIXEL_TOLERANCE = 2
 NATIVE_PROBE_CLEANUP_RESERVE = 1.0
 
 
@@ -244,27 +243,57 @@ def _validate_native_probe(
     except OSError as exc:
         raise RuntimeError(f"could not read native window screenshot: {exc}") from exc
     try:
-        png_width, png_height = cdp._decode_png_dimensions(png)
+        png_width, png_height = cdp._decode_png_dimensions(
+            png, require_nontransparent=True
+        )
     except RuntimeError as exc:
         detail = str(exc).replace("Page.captureScreenshot", "native window screenshot")
         raise RuntimeError(detail) from exc
     display_scale = _require_number(probe.get("display_scale"), "display scale")
-    if display_scale <= 0:
-        raise RuntimeError("native probe reported a non-positive display scale")
-    expected_width = round(normalized_native_bounds["width"] * display_scale)
-    expected_height = round(normalized_native_bounds["height"] * display_scale)
-    if (
-        abs(png_width - expected_width) > PIXEL_TOLERANCE
-        or abs(png_height - expected_height) > PIXEL_TOLERANCE
+    supported_scale = next(
+        (
+            candidate
+            for candidate in (1.0, 2.0)
+            if math.isclose(display_scale, candidate, abs_tol=0.01)
+        ),
+        None,
+    )
+    if supported_scale is None:
+        raise RuntimeError(
+            f"native probe reported an unsupported display scale: {display_scale}"
+        )
+    display_scale = supported_scale
+    scaled_width = normalized_native_bounds["width"] * display_scale
+    scaled_height = normalized_native_bounds["height"] * display_scale
+    minimum_width = max(1, math.floor(scaled_width))
+    maximum_width = max(1, math.ceil(scaled_width))
+    minimum_height = max(1, math.floor(scaled_height))
+    maximum_height = max(1, math.ceil(scaled_height))
+    if not (
+        minimum_width <= png_width <= maximum_width
+        and minimum_height <= png_height <= maximum_height
     ):
         raise RuntimeError(
             "native screenshot dimensions do not match the whole native window: "
-            f"expected approximately {expected_width}x{expected_height}, "
+            f"expected {minimum_width}..{maximum_width}x"
+            f"{minimum_height}..{maximum_height}, "
             f"found {png_width}x{png_height}"
+        )
+    minimum_aspect = minimum_width / maximum_height
+    maximum_aspect = maximum_width / minimum_height
+    screenshot_aspect = png_width / png_height
+    if not minimum_aspect <= screenshot_aspect <= maximum_aspect:
+        raise RuntimeError(
+            "native screenshot aspect ratio does not match the whole native "
+            f"window: expected {minimum_aspect}..{maximum_aspect}, "
+            f"found {screenshot_aspect}"
         )
 
     return {
         **probe,
+        "display_scale": display_scale,
+        "native_window_screenshot_aspect_max": maximum_aspect,
+        "native_window_screenshot_aspect_min": minimum_aspect,
         "native_window_screenshot_bytes": len(png),
         "native_window_screenshot_height": png_height,
         "native_window_screenshot_width": png_width,
@@ -322,11 +351,29 @@ def validate_then_close(
             screenshot_path=screenshot_path,
             cdp_bounds=cdp_bounds,
         )
-        _remaining(deadline, "validating the native boundary probe result")
+        _remaining(deadline, "revalidating browser bounds after native capture")
+        window_after_capture = client.call(
+            "Browser.getWindowForTarget",
+            {"targetId": target_id},
+            deadline=deadline,
+        )
+        if window_after_capture.get("windowId") != window_id:
+            raise RuntimeError("CDP browser window identity changed during capture")
+        cdp_bounds_after_capture = _validate_window_bounds(
+            _require_mapping(
+                window_after_capture.get("bounds"),
+                "post-capture CDP browser window bounds",
+            ),
+            context="post-capture CDP browser window",
+        )
+        for key in ("left", "top", "width", "height"):
+            if abs(cdp_bounds_after_capture[key] - cdp_bounds[key]) > BOUNDS_TOLERANCE:
+                raise RuntimeError(f"CDP browser window {key} changed during capture")
         result.update(
             {
                 "browser_pid": browser_pid,
                 "cdp_window_bounds": cdp_bounds,
+                "cdp_window_bounds_after_capture": cdp_bounds_after_capture,
                 "cdp_window_id": window_id,
                 "native_boundary": native,
                 "page_target_count": 1,

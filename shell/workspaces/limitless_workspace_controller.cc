@@ -1185,8 +1185,7 @@ bool WorkspaceController::ShouldPublish() const {
          !state_changed_.is_null();
 }
 
-base::WeakPtr<WorkspaceController>
-WorkspaceController::GetWeakPtrForSessionRestore() {
+base::WeakPtr<WorkspaceController> WorkspaceController::GetWeakPtr() {
   return weak_ptr_factory_.GetWeakPtr();
 }
 
@@ -1243,7 +1242,7 @@ void FinalizeWorkspaceSessionRestore(Profile* profile) {
   std::vector<base::WeakPtr<WorkspaceController>> matching;
   for (const auto& [browser_window, controller] : GetControllers()) {
     if (controller->profile() == profile) {
-      matching.push_back(controller->GetWeakPtrForSessionRestore());
+      matching.push_back(controller->GetWeakPtr());
     }
   }
   for (base::WeakPtr<WorkspaceController>& controller : matching) {

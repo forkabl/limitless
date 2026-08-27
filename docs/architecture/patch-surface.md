@@ -4,7 +4,7 @@
 
 This patch budget is for a macOS-only v1. Linux and Windows patch work is deferred and requires a separate architecture review before either platform enters scope.
 
-Neither shell candidate patches the browser-window factory or adds a Limitless `BrowserWindow` subclass. The WebUI experiment reuses `WebUIBrowserWindow`. The SwiftUI experiment hosts a product-owned `NSView` inside the existing `BrowserView`. One follow-up patch replaces the SwiftUI placeholder at the existing construction call with an authoritative tab rail. A second narrow follow-up routes the product-owned per-window leader controller through Chromium's renderer prehandle and native macOS command-dispatcher seams. A third adds product workspace extra data at Chromium's existing session rebuild and restore boundaries. Two independent patches close issuance-time and post-issuance tab-capability gaps in the WebUI candidate without changing either shell boundary. The split baseline adds three separately owned patches: general session split-ratio validation, a desktop Views drag editability lifecycle notification, and test-only external interactive-test wiring.
+Neither shell candidate patches the browser-window factory or adds a Limitless `BrowserWindow` subclass. The WebUI experiment reuses `WebUIBrowserWindow`. The SwiftUI experiment hosts a product-owned `NSView` inside the existing `BrowserView`. One follow-up patch replaces the SwiftUI placeholder at the existing construction call with an authoritative tab rail. A second narrow follow-up routes the product-owned per-window leader controller through Chromium's renderer prehandle and native macOS command-dispatcher seams. A third adds product workspace extra data at Chromium's existing session rebuild and restore boundaries. Two independent patches close issuance-time and post-issuance tab-capability gaps in the WebUI candidate without changing either shell boundary. The split baseline and first hostile-lifecycle work add five separately owned patches: general session split-ratio validation, a desktop Views drag editability lifecycle notification, test-only external interactive-test wiring, generic macOS child-modal reactivation through Chromium's existing focus contract, and macOS immersive-mode handling for an intentionally absent horizontal tab view.
 
 The smallest Gate 2 validation patch changes two upstream files to let the existing `WebUIBrowserUI` load Limitless-owned resources. The validation launcher supplies `--enable-features=Webium,SurfaceEmbed`.
 
@@ -21,9 +21,11 @@ A distributable build is expected to need five foundation files so product targe
 | Session split-data validation | 3 | Reject hostile non-finite or out-of-range restored ratios without losing prior valid state or later commands |
 | Desktop Views drag editability lifecycle | 8 | Notify every exact-profile tab model at real drag start and after controller plus dragged-view teardown |
 | Split interactive-test wiring | 1 | Link the product-owned split transfer journey into Chromium's existing interactive test executable |
+| macOS child-modal reactivation | 1 | Reactivate a visible non-Aura child modal after its parent takes key focus |
+| macOS immersive tab-overlay safety | 1 | Skip separate tab-overlay entry, resize, and exit work when no initialized horizontal tab view exists |
 | WebUI tab-handle scope fix | 1 | Same-browser membership check before guest creation |
 | WebUI guest-capability lifetime fix | 1 | Permanent revocation on tab detach, contents replacement, and browser close plus per-call authority checks |
-| Current combined unique files | 24 | `webui_browser/BUILD.gn`, `webui_browser_page_handler.cc`, and `browser_view.cc` each have intentional series overlap; `0010` intentionally overlaps the WebUI build file |
+| Current combined unique files | 26 | `webui_browser/BUILD.gn`, `webui_browser_page_handler.cc`, and `browser_view.cc` each have intentional series overlap; `0010` intentionally overlaps the WebUI build file |
 | Expected production foundation | 5 | Central external-root plumbing, product startup dependency, early feature defaults, and resource selection |
 | Expected WebUI production surface with handler fixes | 6 | Five foundation files plus the shared page-handler file while both fixes remain unupstreamed |
 | Current browser factory changes | 0 | Existing `WebUIBrowserWindow` selection is reused |
@@ -462,9 +464,58 @@ Review this patch if the interactive test source set or external-root label
 contract changes. Remove it when Chromium provides a supported external
 interactive browser-test dependency seam, or with the native split journey.
 
+## macOS child-modal reactivation patch
+
+### `0011-macos-modal-dialog-reactivation.patch`
+
+This generic one-file patch completes the existing
+`WebContentsModalDialogManager::FocusTopmostDialog()` contract on macOS. The
+non-Aura `NativeWebContentsModalDialogManagerViews::Focus()` path already
+requests focus inside the dialog's Views hierarchy, but that does not make the
+child `NSWindow` key again after a native control activates the parent browser
+window. The patch adds only `Widget::Activate()` on the non-Aura path. Aura
+behavior, dialog ownership, anchoring, input blocking, and product code remain
+unchanged.
+
+The outside-in split prompt journey opens a real page prompt in the inactive
+visible pane, proves the live modal manager selects that pane's distinct host,
+activates the pane through the real SwiftUI row action, and requires the exact
+child prompt window to become key before dismissal and renderer input. Review
+this patch if the constrained-window focus implementation or macOS widget
+activation contract changes. Remove it when Chromium provides equivalent
+child-modal reactivation through the supported topmost-dialog focus route.
+
+## macOS immersive tab-overlay safety patch
+
+### `0012-macos-immersive-tab-overlay-safety.patch`
+
+This generic one-file patch distinguishes a window that is eligible for tabbed
+immersive mode from one that actually has an initialized horizontal tab view.
+Limitless intentionally suppresses that view, while Chromium remains the sole
+owner of the native fullscreen transition and immersive toolbar. The stock
+controller previously tried to size a separate native tab overlay from the
+absent strip and hit the macOS zero-sized-window DCHECK during the real
+fullscreen command path.
+
+The patch gates separate-tab-overlay entry on `GetTabStripView()`, then uses
+the existing nonzero `tab_widget_height_` as proof that exit and resize work is
+valid. Stock initialized horizontal strips and Chromium's existing zero-tab-ID
+vertical path remain unchanged. The Limitless outside-in journey reproduces the
+former crash and reaches the native fullscreen transition with exact split and
+rail state intact. In this environment that transition still stalls at the
+same waiter as the retained stock Chromium fullscreen control, so Spaces,
+multidisplay, hardware input, external accessibility, and pixel acceptance
+remain explicit red gates.
+
+Review this patch if separate tab-overlay creation, resize, or cleanup moves,
+if `GetTabStripView()` stops identifying an initialized horizontal strip, or if
+zero stops meaning no hosted tab overlay. Remove it when Chromium natively
+skips separate-tab-overlay entry, resize, and exit work when the horizontal tab
+view is absent.
+
 ## Expected production-only patches
 
-These unnumbered replacement concepts make the likely production surface visible. They are not entries in the current ordered series, must not reuse the current `0001` through `0010` filenames, and are not approved until Gate 2 succeeds.
+These unnumbered replacement concepts make the likely production surface visible. They are not entries in the current ordered series, must not reuse the current `0001` through `0012` filenames, and are not approved until Gate 2 succeeds.
 
 ### Future external build-root replacement
 

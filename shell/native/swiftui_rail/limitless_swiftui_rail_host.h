@@ -39,10 +39,10 @@ inline constexpr char kSwiftUIBoundaryProbeSwitch[] =
     "limitless-swiftui-boundary-probe";
 inline constexpr int kSwiftUITabRailWidth = 216;
 
-// Returns a product-owned SwiftUI tab rail only for the explicit Gate 2B
-// experiment. The returned generic Views host observes the supplied window's
-// authoritative tab list. It creates no Browser, BrowserWindow, or NSWindow and
-// never receives a WebContents native view.
+// Returns a product-owned SwiftUI tab rail only for an eligible normal window
+// in the explicit Gate 2B experiment. The returned generic Views host observes
+// the supplied window's authoritative tab list. It creates no Browser,
+// BrowserWindow, or NSWindow and never receives a WebContents native view.
 std::unique_ptr<views::View> MaybeCreateSwiftUITabRail(
     BrowserWindowInterface* browser_window);
 

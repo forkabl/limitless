@@ -1,0 +1,34 @@
+diff --git a/chrome/browser/ui/views/frame/immersive_mode_controller_mac.mm b/chrome/browser/ui/views/frame/immersive_mode_controller_mac.mm
+index fdbb4cf741eb3de803fdf4b053813d8f1ad2d16e..c20d140c9ad0aa88b5e024e589b10e2f94ff95ef 100644
+--- a/chrome/browser/ui/views/frame/immersive_mode_controller_mac.mm
++++ b/chrome/browser/ui/views/frame/immersive_mode_controller_mac.mm
+@@ -102,7 +102,9 @@ void ImmersiveModeControllerMac::SetEnabled(bool enabled) {
+   if (enabled) {
+     // Vertical tab strip should stay visible and will not be reparented to the
+     // tab overlay.
+-    if (separate_tab_strip_ && !browser_view_->ShouldDrawVerticalTabStrip()) {
++    // A tabbed window may intentionally omit the horizontal tab view.
++    if (separate_tab_strip_ && !browser_view_->ShouldDrawVerticalTabStrip() &&
++        browser_view_->tab_strip_view()->GetTabStripView() != nullptr) {
+       tab_widget_height_ = browser_view_->tab_strip_view()->height();
+       tab_widget_height_ += static_cast<BrowserFrameViewMac*>(
+                                 browser_view_->browser_widget()->GetFrameView())
+@@ -189,7 +191,7 @@ void ImmersiveModeControllerMac::SetEnabled(bool enabled) {
+     // when transitioning to full screen. Call it now.
+     OnViewBoundsChanged(browser_view_->top_container());
+   } else {
+-    if (separate_tab_strip_) {
++    if (tab_widget_height_ > 0) {
+       browser_view_->tab_overlay_widget()->Hide();
+       browser_view_->tab_strip_view()->SetBorder(nullptr);
+     }
+@@ -360,7 +362,8 @@ void ImmersiveModeControllerMac::OnViewBoundsChanged(
+   // OnViewBoundsChanged does not get called.
+   // tab_overlay_widget size should only be set if we aren't drawing the
+   // vertical tabstrip.
+-  if (separate_tab_strip_ && !browser_view_->ShouldDrawVerticalTabStrip()) {
++  if (tab_widget_height_ > 0 &&
++      !browser_view_->ShouldDrawVerticalTabStrip()) {
+     gfx::Size new_size(bounds.width(), tab_widget_height_);
+     browser_view_->tab_overlay_widget()->SetSize(new_size);
+     browser_view_->tab_overlay_view()->SetSize(new_size);
