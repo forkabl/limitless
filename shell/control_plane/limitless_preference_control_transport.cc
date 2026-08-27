@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stddef.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -24,6 +25,7 @@
 #include <string>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
@@ -54,15 +56,13 @@ bool ConfigureIoDeadline(int fd, base::TimeTicks deadline) {
 }
 
 bool ReadExactly(int fd,
-                 void* destination,
-                 size_t length,
+                 base::span<uint8_t> output,
                  base::TimeTicks deadline) {
-  auto* output = static_cast<unsigned char*>(destination);
-  while (length > 0) {
+  while (!output.empty()) {
     if (!ConfigureIoDeadline(fd, deadline)) {
       return false;
     }
-    const ssize_t read_size = read(fd, output, length);
+    const ssize_t read_size = read(fd, output.data(), output.size());
     if (read_size == 0) {
       return false;
     }
@@ -72,30 +72,27 @@ bool ReadExactly(int fd,
       }
       return false;
     }
-    output += read_size;
-    length -= static_cast<size_t>(read_size);
+    output = output.subspan(static_cast<size_t>(read_size));
   }
   return true;
 }
 
 bool WriteExactly(int fd,
-                  const void* source,
-                  size_t length,
+                  base::span<const uint8_t> input,
                   base::TimeTicks deadline) {
-  const auto* input = static_cast<const unsigned char*>(source);
-  while (length > 0) {
+  while (!input.empty()) {
     if (!ConfigureIoDeadline(fd, deadline)) {
       return false;
     }
-    const ssize_t write_size = send(fd, input, length, MSG_NOSIGNAL);
+    const ssize_t write_size =
+        send(fd, input.data(), input.size(), MSG_NOSIGNAL);
     if (write_size < 0) {
       if (errno == EINTR) {
         continue;
       }
       return false;
     }
-    input += write_size;
-    length -= static_cast<size_t>(write_size);
+    input = input.subspan(static_cast<size_t>(write_size));
   }
   return true;
 }
@@ -142,6 +139,14 @@ bool IsCurrentUserPeer(int fd) {
   return getpeereid(fd, &peer_uid, &peer_gid) == 0 && peer_uid == geteuid();
 }
 
+bool ConfigureNonBlockingCloseOnExec(int descriptor) {
+  const int descriptor_flags = fcntl(descriptor, F_GETFD);
+  const int status_flags = fcntl(descriptor, F_GETFL);
+  return descriptor_flags >= 0 && status_flags >= 0 &&
+         fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0 &&
+         fcntl(descriptor, F_SETFL, status_flags | O_NONBLOCK) == 0;
+}
+
 std::string SerializeParseError(PreferenceRequestParseStatus status) {
   base::DictValue result;
   result.Set("version", kPreferenceControlSchemaVersion);
@@ -159,8 +164,8 @@ bool SendFramedResponse(int fd,
     return false;
   }
   const uint32_t frame_size = htonl(static_cast<uint32_t>(response.size()));
-  return WriteExactly(fd, &frame_size, sizeof(frame_size), deadline) &&
-         WriteExactly(fd, response.data(), response.size(), deadline);
+  return WriteExactly(fd, base::byte_span_from_ref(frame_size), deadline) &&
+         WriteExactly(fd, base::as_byte_span(response), deadline);
 }
 
 }  // namespace
@@ -212,40 +217,56 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
     return PreferenceControlTransportStartStatus::kPathTooLong;
   }
 
-  listen_fd_.reset(socket(AF_UNIX, SOCK_STREAM, 0));
-  if (!listen_fd_.is_valid()) {
+  base::ScopedFD listen_fd(socket(AF_UNIX, SOCK_STREAM, 0));
+  if (!listen_fd.is_valid()) {
     return PreferenceControlTransportStartStatus::kBindFailed;
   }
-  fcntl(listen_fd_.get(), F_SETFD,
-        fcntl(listen_fd_.get(), F_GETFD) | FD_CLOEXEC);
+  if (!ConfigureNonBlockingCloseOnExec(listen_fd.get())) {
+    return PreferenceControlTransportStartStatus::kBindFailed;
+  }
 
   address.sun_family = AF_UNIX;
-  std::memcpy(address.sun_path, socket_path_.value().c_str(),
-              socket_path_.value().size() + 1);
+  base::span(address.sun_path)
+      .copy_prefix_from(base::span(socket_path_.value()));
+  base::span(address.sun_path)[socket_path_.value().size()] = '\0';
   unlink(socket_path_.value().c_str());
   const socklen_t address_length = static_cast<socklen_t>(
       offsetof(sockaddr_un, sun_path) + socket_path_.value().size() + 1);
-  if (bind(listen_fd_.get(), reinterpret_cast<sockaddr*>(&address),
+  if (bind(listen_fd.get(), reinterpret_cast<sockaddr*>(&address),
            address_length) != 0 ||
       chmod(socket_path_.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
-      listen(listen_fd_.get(), kListenBacklog) != 0) {
-    listen_fd_.reset();
+      listen(listen_fd.get(), kListenBacklog) != 0) {
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kBindFailed;
   }
   if (!WriteCredential()) {
-    listen_fd_.reset();
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kCredentialWriteFailed;
   }
   if (!WriteDescriptor()) {
-    listen_fd_.reset();
     unlink(credential_path_.value().c_str());
     unlink(socket_path_.value().c_str());
     return PreferenceControlTransportStartStatus::kDescriptorWriteFailed;
   }
+  int cancellation_descriptors[2] = {-1, -1};
+  if (pipe(cancellation_descriptors) != 0) {
+    unlink(descriptor_path_.value().c_str());
+    unlink(credential_path_.value().c_str());
+    unlink(socket_path_.value().c_str());
+    return PreferenceControlTransportStartStatus::kCancellationChannelFailed;
+  }
+  base::ScopedFD cancellation_reader(cancellation_descriptors[0]);
+  cancellation_fd_.reset(cancellation_descriptors[1]);
+  if (!ConfigureNonBlockingCloseOnExec(cancellation_reader.get()) ||
+      !ConfigureNonBlockingCloseOnExec(cancellation_fd_.get())) {
+    cancellation_fd_.reset();
+    unlink(descriptor_path_.value().c_str());
+    unlink(credential_path_.value().c_str());
+    unlink(socket_path_.value().c_str());
+    return PreferenceControlTransportStartStatus::kCancellationChannelFailed;
+  }
   if (!io_thread_.Start()) {
-    listen_fd_.reset();
+    cancellation_fd_.reset();
     unlink(descriptor_path_.value().c_str());
     unlink(credential_path_.value().c_str());
     unlink(socket_path_.value().c_str());
@@ -253,12 +274,12 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
   }
 
   stopping_.store(false, std::memory_order_release);
-  listen_descriptor_.store(listen_fd_.get(), std::memory_order_release);
   running_ = true;
   io_thread_.task_runner()->PostTask(
       FROM_HERE,
       base::BindOnce(&PreferenceControlTransport::AcceptLoop,
-                     base::Unretained(this), weak_factory_.GetWeakPtr()));
+                     base::Unretained(this), weak_factory_.GetWeakPtr(),
+                     std::move(listen_fd), std::move(cancellation_reader)));
   return PreferenceControlTransportStartStatus::kSuccess;
 }
 
@@ -268,10 +289,9 @@ void PreferenceControlTransport::Stop() {
   }
   weak_factory_.InvalidateWeakPtrs();
   stopping_.store(true, std::memory_order_release);
-  const int listen_descriptor =
-      listen_descriptor_.load(std::memory_order_acquire);
-  if (listen_descriptor >= 0) {
-    shutdown(listen_descriptor, SHUT_RDWR);
+  if (cancellation_fd_.is_valid()) {
+    const char cancellation = 0;
+    write(cancellation_fd_.get(), &cancellation, sizeof(cancellation));
   }
   {
     std::lock_guard lock(accepted_connection_mutex_);
@@ -292,12 +312,16 @@ void PreferenceControlTransport::Stop() {
     pending->ready.notify_one();
   }
   io_thread_.Stop();
-  listen_descriptor_.store(-1, std::memory_order_release);
-  listen_fd_.reset();
+  cancellation_fd_.reset();
   unlink(descriptor_path_.value().c_str());
   unlink(credential_path_.value().c_str());
   unlink(socket_path_.value().c_str());
   running_ = false;
+}
+
+bool PreferenceControlTransport::has_accepted_connection_for_testing() {
+  std::lock_guard lock(accepted_connection_mutex_);
+  return accepted_connection_descriptor_ >= 0;
 }
 
 bool PreferenceControlTransport::PrepareRuntimeDirectory() {
@@ -333,16 +357,27 @@ bool PreferenceControlTransport::WriteCredential() {
 }
 
 void PreferenceControlTransport::AcceptLoop(
-    base::WeakPtr<PreferenceControlTransport> origin_weak_ptr) {
+    base::WeakPtr<PreferenceControlTransport> origin_weak_ptr,
+    base::ScopedFD listen_fd,
+    base::ScopedFD cancellation_fd) {
   while (!stopping_.load(std::memory_order_acquire)) {
-    const int listen_descriptor =
-        listen_descriptor_.load(std::memory_order_acquire);
-    if (listen_descriptor < 0) {
+    pollfd descriptors[] = {
+        {.fd = listen_fd.get(), .events = POLLIN, .revents = 0},
+        {.fd = cancellation_fd.get(), .events = POLLIN, .revents = 0},
+    };
+    const int ready = poll(descriptors, std::size(descriptors), -1);
+    if (ready < 0 && errno == EINTR) {
+      continue;
+    }
+    if (ready <= 0 || descriptors[1].revents != 0) {
       break;
     }
-    base::ScopedFD connection(accept(listen_descriptor, nullptr, nullptr));
+    if (!(descriptors[0].revents & POLLIN)) {
+      break;
+    }
+    base::ScopedFD connection(accept(listen_fd.get(), nullptr, nullptr));
     if (!connection.is_valid()) {
-      if (errno == EINTR) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
         continue;
       }
       break;
@@ -361,8 +396,8 @@ void PreferenceControlTransport::AcceptLoop(
         base::TimeTicks::Now() + kTransportIoTimeout;
 
     uint32_t network_size = 0;
-    if (!ReadExactly(connection.get(), &network_size, sizeof(network_size),
-                     deadline)) {
+    if (!ReadExactly(connection.get(),
+                     base::byte_span_from_ref(network_size), deadline)) {
       continue;
     }
     const size_t payload_size = ntohl(network_size);
@@ -374,7 +409,7 @@ void PreferenceControlTransport::AcceptLoop(
       continue;
     }
     std::string payload(payload_size, '\0');
-    if (!ReadExactly(connection.get(), payload.data(), payload.size(),
+    if (!ReadExactly(connection.get(), base::as_writable_byte_span(payload),
                      deadline)) {
       continue;
     }

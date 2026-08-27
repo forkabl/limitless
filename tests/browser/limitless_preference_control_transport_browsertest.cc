@@ -352,8 +352,8 @@ IN_PROC_BROWSER_TEST_F(
   AppendArguments(&discover, {"discover"});
   const CliResult after_private = RunCli(std::move(discover));
   ASSERT_EQ(0, after_private.exit_code) << after_private.output;
-  const base::ListValue* profiles =
-      ParseCliResult(after_private).FindList("profiles");
+  const base::DictValue after_private_result = ParseCliResult(after_private);
+  const base::ListValue* profiles = after_private_result.FindList("profiles");
   ASSERT_TRUE(profiles);
   EXPECT_EQ(1u, profiles->size());
   EXPECT_EQ(kCompactRailDensity,

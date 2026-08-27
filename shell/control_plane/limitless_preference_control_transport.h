@@ -32,6 +32,7 @@ enum class PreferenceControlTransportStartStatus {
   kBindFailed,
   kCredentialWriteFailed,
   kDescriptorWriteFailed,
+  kCancellationChannelFailed,
   kThreadStartFailed,
 };
 
@@ -57,6 +58,7 @@ class PreferenceControlTransport {
   const base::FilePath& descriptor_path() const { return descriptor_path_; }
   const base::FilePath& credential_path() const { return credential_path_; }
   const base::FilePath& socket_path() const { return socket_path_; }
+  bool has_accepted_connection_for_testing();
 
  private:
   struct PendingResponse;
@@ -64,7 +66,9 @@ class PreferenceControlTransport {
   bool PrepareRuntimeDirectory();
   bool WriteCredential();
   bool WriteDescriptor();
-  void AcceptLoop(base::WeakPtr<PreferenceControlTransport> origin_weak_ptr);
+  void AcceptLoop(base::WeakPtr<PreferenceControlTransport> origin_weak_ptr,
+                  base::ScopedFD listen_fd,
+                  base::ScopedFD cancellation_fd);
   void ClearAcceptedConnection(int descriptor);
   void HandleRequestOnOrigin(std::string payload,
                              std::shared_ptr<PendingResponse> pending);
@@ -75,8 +79,7 @@ class PreferenceControlTransport {
   base::FilePath descriptor_path_;
   base::FilePath credential_path_;
   base::FilePath socket_path_;
-  base::ScopedFD listen_fd_;
-  std::atomic<int> listen_descriptor_{-1};
+  base::ScopedFD cancellation_fd_;
   std::mutex accepted_connection_mutex_;
   int accepted_connection_descriptor_ = -1;
   std::mutex pending_response_mutex_;
