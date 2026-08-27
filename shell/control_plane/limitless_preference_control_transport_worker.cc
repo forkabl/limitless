@@ -40,8 +40,11 @@ void TransportCancellationState::Cancel() {
   base::AutoLock guard(lock);
   if (writer_fd.is_valid()) {
     const char byte = 0;
-    if (write(writer_fd.get(), &byte, 1) < 0 && errno != EINTR && errno != EAGAIN) {
-      writer_fd.reset();
+    for (;;) {
+      ssize_t written = write(writer_fd.get(), &byte, 1);
+      if (written == 1 || (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) break;
+      if (written < 0 && errno == EINTR) continue;
+      writer_fd.reset(); break;
     }
   }
 }
@@ -68,6 +71,7 @@ PreferenceControlTransportWorker::PreferenceControlTransportWorker(
 
 PreferenceControlTransportWorker::~PreferenceControlTransportWorker() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  Cleanup();
 }
 
 PreferenceControlTransportWorker::PrepareResult
@@ -104,6 +108,21 @@ PreferenceControlTransportWorker::Prepare() {
       chmod(inputs_.socket_path.value().c_str(), S_IRUSR | S_IWUSR) != 0 ||
       listen(listener_.get(), 4) != 0) { Cleanup(); return result; }
   owns_socket_ = true;
+  // Establish cancellation before publishing any endpoint artifacts.
+  int pipe_fds[2];
+  if (pipe(pipe_fds) != 0) { result.status = WorkerPrepareStatus::kCancellationChannel; Cleanup(); return result; }
+  cancellation_reader_.reset(pipe_fds[0]);
+  flags = fcntl(pipe_fds[1], F_GETFD); status = fcntl(pipe_fds[1], F_GETFL);
+  int reader_flags = fcntl(cancellation_reader_.get(), F_GETFD);
+  int reader_status = fcntl(cancellation_reader_.get(), F_GETFL);
+  if (flags < 0 || status < 0 || reader_flags < 0 || reader_status < 0 ||
+      fcntl(pipe_fds[1], F_SETFD, flags | FD_CLOEXEC) != 0 ||
+      fcntl(pipe_fds[1], F_SETFL, status | O_NONBLOCK) != 0 ||
+      fcntl(cancellation_reader_.get(), F_SETFD, reader_flags | FD_CLOEXEC) != 0 ||
+      fcntl(cancellation_reader_.get(), F_SETFL, reader_status | O_NONBLOCK) != 0) {
+    close(pipe_fds[1]); result.status = WorkerPrepareStatus::kCancellationChannel; Cleanup(); return result;
+  }
+  cancellation_->InstallWriter(pipe_fds[1]);
   if (cancellation_->cancelled.load(std::memory_order_acquire) ||
       !WriteAtomic(inputs_.credential_path, inputs_.capability)) { result.status = WorkerPrepareStatus::kCredential; Cleanup(); return result; }
   owns_credential_ = true;
@@ -121,21 +140,6 @@ PreferenceControlTransportWorker::Prepare() {
   if (cancellation_->cancelled.load(std::memory_order_acquire) ||
       !WriteAtomic(inputs_.descriptor_path, descriptor)) { result.status = WorkerPrepareStatus::kDescriptor; Cleanup(); return result; }
   owns_descriptor_ = true;
-  int pipe_fds[2];
-  if (pipe(pipe_fds) != 0) { result.status = WorkerPrepareStatus::kCancellationChannel; Cleanup(); return result; }
-  cancellation_reader_.reset(pipe_fds[0]);
-  flags = fcntl(pipe_fds[1], F_GETFD);
-  status = fcntl(pipe_fds[1], F_GETFL);
-  int reader_flags = fcntl(cancellation_reader_.get(), F_GETFD);
-  int reader_status = fcntl(cancellation_reader_.get(), F_GETFL);
-  if (flags < 0 || status < 0 || reader_flags < 0 || reader_status < 0 ||
-      fcntl(pipe_fds[1], F_SETFD, flags | FD_CLOEXEC) != 0 ||
-      fcntl(pipe_fds[1], F_SETFL, status | O_NONBLOCK) != 0 ||
-      fcntl(cancellation_reader_.get(), F_SETFD, reader_flags | FD_CLOEXEC) != 0 ||
-      fcntl(cancellation_reader_.get(), F_SETFL, reader_status | O_NONBLOCK) != 0) {
-    close(pipe_fds[1]); Cleanup(); return result;
-  }
-  cancellation_->InstallWriter(pipe_fds[1]);
   if (cancellation_->cancelled.load(std::memory_order_acquire)) { result.status = WorkerPrepareStatus::kCancelled; Cleanup(); return result; }
   published_ = true;
   result.status = WorkerPrepareStatus::kSuccess;
