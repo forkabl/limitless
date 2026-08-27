@@ -14,6 +14,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -25,9 +26,9 @@
 
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
-#include "base/scoped_closure_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 
@@ -279,15 +280,17 @@ void PreferenceControlTransport::Stop() {
       shutdown(accepted_connection_descriptor_, SHUT_RDWR);
     }
   }
+  std::shared_ptr<PendingResponse> pending;
   {
     std::lock_guard lock(pending_response_mutex_);
-    if (auto pending = pending_response_.lock()) {
-      {
-        std::lock_guard pending_lock(pending->mutex);
-        pending->cancelled = true;
-      }
-      pending->ready.notify_one();
+    pending = pending_response_.lock();
+  }
+  if (pending) {
+    {
+      std::lock_guard pending_lock(pending->mutex);
+      pending->cancelled = true;
     }
+    pending->ready.notify_one();
   }
   io_thread_.Stop();
   listen_descriptor_.store(-1, std::memory_order_release);
@@ -332,47 +335,86 @@ bool PreferenceControlTransport::WriteCredential() {
 void PreferenceControlTransport::AcceptLoop(
     base::WeakPtr<PreferenceControlTransport> origin_weak_ptr) {
   while (!stopping_.load(std::memory_order_acquire)) {
-    base::ScopedFD connection(accept(listen_fd_.get(), nullptr, nullptr));
+    const int listen_descriptor =
+        listen_descriptor_.load(std::memory_order_acquire);
+    if (listen_descriptor < 0) {
+      break;
+    }
+    base::ScopedFD connection(accept(listen_descriptor, nullptr, nullptr));
     if (!connection.is_valid()) {
       if (errno == EINTR) {
         continue;
       }
       break;
     }
-    ConfigureIoDeadline(connection.get());
+    {
+      std::lock_guard lock(accepted_connection_mutex_);
+      accepted_connection_descriptor_ = connection.get();
+    }
+    base::ScopedClosureRunner clear_accepted(
+        base::BindOnce(&PreferenceControlTransport::ClearAcceptedConnection,
+                       base::Unretained(this), connection.get()));
     if (!IsCurrentUserPeer(connection.get())) {
       continue;
     }
+    const base::TimeTicks deadline =
+        base::TimeTicks::Now() + kTransportIoTimeout;
 
     uint32_t network_size = 0;
-    if (!ReadExactly(connection.get(), &network_size, sizeof(network_size))) {
+    if (!ReadExactly(connection.get(), &network_size, sizeof(network_size),
+                     deadline)) {
       continue;
     }
     const size_t payload_size = ntohl(network_size);
     if (payload_size == 0 || payload_size > kMaximumPreferenceRequestBytes) {
       SendFramedResponse(
           connection.get(),
-          SerializeParseError(PreferenceRequestParseStatus::kOversized));
+          SerializeParseError(PreferenceRequestParseStatus::kOversized),
+          deadline);
       continue;
     }
     std::string payload(payload_size, '\0');
-    if (!ReadExactly(connection.get(), payload.data(), payload.size())) {
+    if (!ReadExactly(connection.get(), payload.data(), payload.size(),
+                     deadline)) {
       continue;
     }
 
     auto pending = std::make_shared<PendingResponse>();
+    {
+      std::lock_guard lock(pending_response_mutex_);
+      pending_response_ = pending;
+    }
     origin_task_runner_->PostTask(
         FROM_HERE,
         base::BindOnce(&PreferenceControlTransport::HandleRequestOnOrigin,
                        origin_weak_ptr, std::move(payload), pending));
     std::unique_lock lock(pending->mutex);
-    if (!pending->ready.wait_for(
-            lock,
-            std::chrono::milliseconds(kTransportIoTimeout.InMilliseconds()),
-            [&pending] { return pending->response.has_value(); })) {
+    const base::TimeDelta remaining = deadline - base::TimeTicks::Now();
+    if (!remaining.is_positive() ||
+        !pending->ready.wait_for(
+            lock, std::chrono::microseconds(remaining.InMicroseconds()),
+            [&pending] {
+              return pending->response.has_value() || pending->cancelled;
+            }) ||
+        pending->cancelled) {
+      lock.unlock();
+      std::lock_guard pending_lock(pending_response_mutex_);
+      pending_response_.reset();
       continue;
     }
-    SendFramedResponse(connection.get(), *pending->response);
+    SendFramedResponse(connection.get(), *pending->response, deadline);
+    lock.unlock();
+    {
+      std::lock_guard pending_lock(pending_response_mutex_);
+      pending_response_.reset();
+    }
+  }
+}
+
+void PreferenceControlTransport::ClearAcceptedConnection(int descriptor) {
+  std::lock_guard lock(accepted_connection_mutex_);
+  if (accepted_connection_descriptor_ == descriptor) {
+    accepted_connection_descriptor_ = -1;
   }
 }
 
