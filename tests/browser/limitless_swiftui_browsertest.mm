@@ -62,15 +62,19 @@
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
 #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/ui/sad_tab_helper.h"
 #include "chrome/browser/ui/tabs/features.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
+#include "chrome/browser/ui/views/frame/contents_web_view.h"
 #include "chrome/browser/ui/views/frame/multi_contents_view.h"
 #include "chrome/browser/ui/views/frame/tab_strip_region_view.h"
+#include "chrome/browser/ui/views/frame/top_container_view.h"
 #include "chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
 #include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
+#include "chrome/browser/ui/views/sad_tab_view.h"
 #include "chrome/browser/ui/webui_browser/webui_browser_window.h"
 #include "chrome/common/chrome_features.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -92,6 +96,7 @@
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/common/result_codes.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "limitless_swiftui_rail_host.h"
@@ -552,6 +557,44 @@ bool CreateNativeSplitThroughRail(views::View* rail,
            }
            return false;
          });
+}
+
+bool RailProjectsExactSplit(views::View* rail,
+                            const std::string& first_identifier,
+                            const std::string& second_identifier,
+                            const std::string& active_identifier,
+                            const std::string& layout,
+                            double ratio) {
+  return WaitForCondition([&]() {
+    const auto snapshot = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    return snapshot && snapshot->split_pair_identifiers.size() == 1 &&
+           snapshot->split_first_tab_identifiers ==
+               std::vector<std::string>{first_identifier} &&
+           snapshot->split_second_tab_identifiers ==
+               std::vector<std::string>{second_identifier} &&
+           snapshot->split_active_tab_identifiers ==
+               std::vector<std::string>{active_identifier} &&
+           snapshot->split_layouts == std::vector<std::string>{layout} &&
+           snapshot->split_ratios == std::vector<double>{ratio};
+  });
+}
+
+SadTabView* FindSadTabViewForContents(BrowserView* browser_view,
+                                      content::WebContents* contents) {
+  CHECK(browser_view);
+  CHECK(contents);
+  for (ContentsWebView* contents_view :
+       browser_view->GetAllVisibleContentsWebViews()) {
+    if (contents_view->web_contents() != contents) {
+      continue;
+    }
+    for (views::View* child : contents_view->children()) {
+      if (SadTabView* sad_tab_view = views::AsViewClass<SadTabView>(child)) {
+        return sad_tab_view;
+      }
+    }
+  }
+  return nullptr;
 }
 
 tabs::TabInterface* FindTabWithProductIdentifier(
@@ -1723,6 +1766,468 @@ IN_PROC_BROWSER_TEST_F(
   EXPECT_EQ(split_id, two->GetSplit());
   EXPECT_EQ(one_contents, one->GetContents());
   EXPECT_EQ(two_contents, two->GetContents());
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    NativeBrowserFullscreenPreservesExactSplitProjectionAndPaneFocus) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/keys")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/keys"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  ASSERT_EQ(2, tab_strip->count());
+  tabs::TabInterface* one = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* two = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(one);
+  ASSERT_TRUE(two);
+  content::WebContents* one_contents = one->GetContents();
+  content::WebContents* two_contents = two->GetContents();
+  ASSERT_TRUE(ResetKeyEvidence(one_contents, /*focus_input=*/false));
+  ASSERT_TRUE(ResetKeyEvidence(two_contents, /*focus_input=*/false));
+
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(WaitForRailTabs(rail, 2));
+  ASSERT_TRUE(CreateNativeSplitThroughRail(rail, browser(), one, two));
+  const split_tabs::SplitTabId split_id = *one->GetSplit();
+  const auto layout_action =
+      limitless::PerformSwiftUIAccessibilityMenuItemForTesting(
+          rail, "limitless-split-layout", "limitless-split-layout-stacked");
+  ASSERT_TRUE(layout_action);
+  ASSERT_TRUE(layout_action->press_invoked);
+  const auto ratio_action =
+      limitless::PerformSwiftUIAccessibilityMenuItemForTesting(
+          rail, "limitless-split-ratio", "limitless-split-ratio-25");
+  ASSERT_TRUE(ratio_action);
+  ASSERT_TRUE(ratio_action->press_invoked);
+
+  split_tabs::SplitTabData* split_data = tab_strip->GetSplitData(split_id);
+  ASSERT_TRUE(split_data);
+  ASSERT_TRUE(WaitForCondition([&]() {
+    split_data = tab_strip->GetSplitData(split_id);
+    return split_data &&
+           split_data->visual_data()->split_layout() ==
+               split_tabs::SplitTabLayout::kStacked &&
+           split_data->visual_data()->split_ratio() == 0.25;
+  }));
+  const std::vector<tabs::TabInterface*> ordered_tabs = split_data->ListTabs();
+  ASSERT_EQ(2u, ordered_tabs.size());
+  const std::string first_identifier =
+      ProductIdentifierForTab(browser(), ordered_tabs[0]);
+  const std::string second_identifier =
+      ProductIdentifierForTab(browser(), ordered_tabs[1]);
+  const std::string active_identifier = ProductIdentifierForTab(browser(), two);
+  limitless::WorkspaceController* workspace_controller =
+      limitless::WorkspaceController::From(browser());
+  ASSERT_TRUE(workspace_controller);
+  const std::optional<std::string> workspace_identifier =
+      workspace_controller->GetWorkspaceIdentifierForTab(two->GetHandle());
+  ASSERT_TRUE(workspace_identifier);
+  EXPECT_EQ(
+      workspace_identifier,
+      workspace_controller->GetWorkspaceIdentifierForTab(one->GetHandle()));
+  const auto focus_two = [&]() {
+    return limitless::PerformSwiftUIAccessibilityActionForTesting(
+        GetSwiftUITabRail(browser()),
+        "limitless-tab-" + std::to_string(two->GetHandle().raw_value()),
+        limitless::SwiftUIAccessibilityActionForTesting::kPress);
+  };
+  const auto focus_one = [&]() {
+    return limitless::PerformSwiftUIAccessibilityActionForTesting(
+        GetSwiftUITabRail(browser()),
+        "limitless-tab-" + std::to_string(one->GetHandle().raw_value()),
+        limitless::SwiftUIAccessibilityActionForTesting::kPress);
+  };
+  ASSERT_TRUE(focus_two());
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        two_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == two && view && view->HasFocus();
+  }));
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     active_identifier, "stacked", 0.25));
+  ASSERT_TRUE(FocusKeyEvidenceInput(two_contents));
+  SendRendererKey(browser(), ui::VKEY_B, ui::EF_NONE, u'b');
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return KeyInputValue(two_contents) == "b"; }));
+  EXPECT_EQ("", KeyInputValue(one_contents));
+
+  BrowserView* initial_browser_view =
+      BrowserView::GetBrowserViewForBrowser(browser());
+  ASSERT_TRUE(initial_browser_view);
+  EXPECT_EQ(nullptr, initial_browser_view->horizontal_tab_strip_for_testing());
+  ASSERT_TRUE(initial_browser_view->tab_strip_view());
+  EXPECT_EQ(nullptr, initial_browser_view->tab_strip_view()->GetTabStripView());
+  EXPECT_EQ(0, initial_browser_view->tab_strip_view()->height());
+  ASSERT_TRUE(initial_browser_view->tab_overlay_widget());
+  EXPECT_FALSE(initial_browser_view->tab_overlay_widget()->IsVisible());
+  EXPECT_GT(initial_browser_view->top_container()->width(), 0);
+  EXPECT_GT(rail->width(), 0);
+  EXPECT_GT(rail->height(), 0);
+
+  const auto exact_native_state = [&](bool expected_fullscreen) {
+    BrowserView* current_view =
+        BrowserView::GetBrowserViewForBrowser(browser());
+    if (!current_view || current_view->IsFullscreen() != expected_fullscreen) {
+      return false;
+    }
+    if (!current_view->tab_overlay_widget() ||
+        current_view->tab_overlay_widget()->IsVisible() ||
+        current_view->tab_strip_view()->GetTabStripView() != nullptr ||
+        current_view->tab_strip_view()->parent() ==
+            current_view->tab_overlay_view()) {
+      return false;
+    }
+    if (!current_view->overlay_widget() ||
+        current_view->overlay_widget()->IsVisible() != expected_fullscreen ||
+        (expected_fullscreen &&
+         current_view->overlay_widget()->GetWindowBoundsInScreen().IsEmpty())) {
+      return false;
+    }
+    NSWindow* native_window =
+        browser()->GetWindow()->GetNativeWindow().GetNativeNSWindow();
+    const bool native_fullscreen =
+        native_window &&
+        (native_window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    if (native_fullscreen != expected_fullscreen) {
+      return false;
+    }
+    split_tabs::SplitTabData* current = tab_strip->GetSplitData(split_id);
+    if (!current || current->ListTabs() != ordered_tabs ||
+        current->visual_data()->split_layout() !=
+            split_tabs::SplitTabLayout::kStacked ||
+        current->visual_data()->split_ratio() != 0.25 ||
+        one->GetContents() != one_contents ||
+        two->GetContents() != two_contents ||
+        tab_strip->GetActiveTab() != two ||
+        workspace_controller->GetWorkspaceIdentifierForTab(one->GetHandle()) !=
+            workspace_identifier ||
+        workspace_controller->GetWorkspaceIdentifierForTab(two->GetHandle()) !=
+            workspace_identifier) {
+      return false;
+    }
+    MultiContentsView* multi_contents = current_view->multi_contents_view();
+    views::NativeViewHost* current_host =
+        views::AsViewClass<views::NativeViewHost>(
+            current_view->limitless_swiftui_rail_for_testing());
+    if (!multi_contents || !multi_contents->IsInSplitView() || !current_host ||
+        !current_host->native_view() || current_host->width() <= 0 ||
+        current_host->height() <= 0 ||
+        current_host->native_view().GetNativeNSView().window != native_window ||
+        multi_contents->start_contents_view_for_testing()->web_contents() !=
+            ordered_tabs[0]->GetContents() ||
+        multi_contents->end_contents_view_for_testing()->web_contents() !=
+            ordered_tabs[1]->GetContents()) {
+      return false;
+    }
+    const gfx::Rect start_bounds =
+        multi_contents->start_contents_view_for_testing()->GetBoundsInScreen();
+    const gfx::Rect end_bounds =
+        multi_contents->end_contents_view_for_testing()->GetBoundsInScreen();
+    return !start_bounds.IsEmpty() && !end_bounds.IsEmpty() &&
+           start_bounds.bottom() <= end_bounds.y() &&
+           start_bounds.height() < end_bounds.height();
+  };
+
+  base::ScopedClosureRunner exit_fullscreen(base::BindLambdaForTesting([&]() {
+    BrowserView* current_view =
+        BrowserView::GetBrowserViewForBrowser(browser());
+    if (current_view && current_view->IsFullscreen()) {
+      ui_test_utils::ToggleFullscreenModeAndWait(browser());
+    }
+  }));
+  ASSERT_TRUE(ui_test_utils::BringBrowserWindowToFront(browser()));
+  ui_test_utils::ToggleFullscreenModeAndWait(browser());
+  ASSERT_TRUE(WaitForCondition([&]() { return exact_native_state(true); },
+                               base::Seconds(15)));
+  rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     active_identifier, "stacked", 0.25));
+
+  ASSERT_TRUE(focus_one());
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        one_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == one && view && view->HasFocus();
+  }));
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     ProductIdentifierForTab(browser(), one),
+                                     "stacked", 0.25));
+  ASSERT_TRUE(FocusKeyEvidenceInput(one_contents));
+  SendRendererKey(browser(), ui::VKEY_F, ui::EF_NONE, u'f');
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return KeyInputValue(one_contents) == "f"; }));
+  EXPECT_EQ("b", KeyInputValue(two_contents));
+
+  ASSERT_TRUE(focus_two());
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        two_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == two && view && view->HasFocus();
+  }));
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     active_identifier, "stacked", 0.25));
+  ui_test_utils::ToggleFullscreenModeAndWait(browser());
+  ASSERT_TRUE(WaitForCondition([&]() { return exact_native_state(false); },
+                               base::Seconds(15)));
+  std::ignore = exit_fullscreen.Release();
+  rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     active_identifier, "stacked", 0.25));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        two_contents->GetRenderWidgetHostView();
+    return view && view->HasFocus();
+  }));
+  ASSERT_TRUE(FocusKeyEvidenceInput(two_contents));
+  SendRendererKey(browser(), ui::VKEY_X, ui::EF_NONE, u'x');
+  ASSERT_TRUE(
+      WaitForCondition([&]() { return KeyInputValue(two_contents) == "bx"; }));
+  EXPECT_EQ("f", KeyInputValue(one_contents));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    LimitlessSwiftUIBrowserTest,
+    RendererCrashRetainsExactNativeSplitAndReloadRecoversPageInput) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), https_server_.GetURL("a.test", "/keys")));
+  ASSERT_TRUE(ui_test_utils::NavigateToURLWithDisposition(
+      browser(), https_server_.GetURL("b.test", "/keys"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP));
+
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
+  ASSERT_EQ(2, tab_strip->count());
+  tabs::TabInterface* healthy = tab_strip->GetTabAtIndex(0);
+  tabs::TabInterface* crashed = tab_strip->GetTabAtIndex(1);
+  ASSERT_TRUE(healthy);
+  ASSERT_TRUE(crashed);
+  content::WebContents* healthy_contents = healthy->GetContents();
+  content::WebContents* crashed_contents = crashed->GetContents();
+  ASSERT_TRUE(healthy_contents->GetPrimaryMainFrame()->IsRenderFrameLive());
+  ASSERT_TRUE(crashed_contents->GetPrimaryMainFrame()->IsRenderFrameLive());
+  content::RenderProcessHost* healthy_process =
+      healthy_contents->GetPrimaryMainFrame()->GetProcess();
+  ASSERT_NE(healthy_process,
+            crashed_contents->GetPrimaryMainFrame()->GetProcess());
+  ASSERT_TRUE(ResetKeyEvidence(healthy_contents, /*focus_input=*/false));
+  ASSERT_TRUE(ResetKeyEvidence(crashed_contents, /*focus_input=*/false));
+
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  ASSERT_TRUE(WaitForRailTabs(rail, 2));
+  ASSERT_TRUE(CreateNativeSplitThroughRail(rail, browser(), healthy, crashed));
+  const split_tabs::SplitTabId split_id = *healthy->GetSplit();
+  const auto layout_action =
+      limitless::PerformSwiftUIAccessibilityMenuItemForTesting(
+          rail, "limitless-split-layout", "limitless-split-layout-stacked");
+  ASSERT_TRUE(layout_action);
+  ASSERT_TRUE(layout_action->press_invoked);
+  const auto ratio_action =
+      limitless::PerformSwiftUIAccessibilityMenuItemForTesting(
+          rail, "limitless-split-ratio", "limitless-split-ratio-25");
+  ASSERT_TRUE(ratio_action);
+  ASSERT_TRUE(ratio_action->press_invoked);
+  ASSERT_TRUE(WaitForCondition([&]() {
+    split_tabs::SplitTabData* current = tab_strip->GetSplitData(split_id);
+    return current &&
+           current->visual_data()->split_layout() ==
+               split_tabs::SplitTabLayout::kStacked &&
+           current->visual_data()->split_ratio() == 0.25;
+  }));
+  split_tabs::SplitTabData* split_data = tab_strip->GetSplitData(split_id);
+  ASSERT_TRUE(split_data);
+  const std::vector<tabs::TabInterface*> ordered_tabs = split_data->ListTabs();
+  ASSERT_EQ(2u, ordered_tabs.size());
+  const std::string first_identifier =
+      ProductIdentifierForTab(browser(), ordered_tabs[0]);
+  const std::string second_identifier =
+      ProductIdentifierForTab(browser(), ordered_tabs[1]);
+  const std::string crashed_identifier =
+      ProductIdentifierForTab(browser(), crashed);
+  limitless::WorkspaceController* workspace_controller =
+      limitless::WorkspaceController::From(browser());
+  ASSERT_TRUE(workspace_controller);
+  const std::optional<std::string> workspace_identifier =
+      workspace_controller->GetWorkspaceIdentifierForTab(crashed->GetHandle());
+  ASSERT_TRUE(workspace_identifier);
+  EXPECT_EQ(
+      workspace_identifier,
+      workspace_controller->GetWorkspaceIdentifierForTab(healthy->GetHandle()));
+
+  const std::string crashed_row =
+      "limitless-tab-" + std::to_string(crashed->GetHandle().raw_value());
+  const std::string healthy_row =
+      "limitless-tab-" + std::to_string(healthy->GetHandle().raw_value());
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, crashed_row,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        crashed_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == crashed && view && view->HasFocus();
+  }));
+  ASSERT_TRUE(FocusKeyEvidenceInput(crashed_contents));
+  SendRendererKey(browser(), ui::VKEY_C, ui::EF_NONE, u'c');
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return KeyInputValue(crashed_contents) == "c"; }));
+  EXPECT_EQ("", KeyInputValue(healthy_contents));
+  ASSERT_TRUE(ui_test_utils::BringBrowserWindowToFront(browser()));
+  BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser());
+  ASSERT_TRUE(browser_view);
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return browser_view->GetWidget()->IsActive(); }));
+
+  {
+    content::RenderProcessHost* crash_process =
+        crashed_contents->GetPrimaryMainFrame()->GetProcess();
+    content::RenderProcessHostWatcher crash_watcher(
+        crash_process,
+        content::RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
+    const bool shutdown_requested =
+        crash_process->Shutdown(content::RESULT_CODE_KILLED);
+    const bool observed_exit = crash_watcher.Wait();
+    ASSERT_TRUE(shutdown_requested);
+    ASSERT_TRUE(observed_exit);
+  }
+
+  ASSERT_TRUE(WaitForCondition([&]() {
+    return crashed_contents->IsCrashed() &&
+           !crashed_contents->GetPrimaryMainFrame()->IsRenderFrameLive() &&
+           FindSadTabViewForContents(browser_view, crashed_contents);
+  }));
+  EXPECT_TRUE(healthy_process->IsInitializedAndNotDead());
+  EXPECT_TRUE(healthy_contents->GetPrimaryMainFrame()->IsRenderFrameLive());
+  EXPECT_EQ(healthy, tab_strip->GetTabAtIndex(0));
+  EXPECT_EQ(crashed, tab_strip->GetTabAtIndex(1));
+  EXPECT_EQ(healthy_contents, healthy->GetContents());
+  EXPECT_EQ(crashed_contents, crashed->GetContents());
+  EXPECT_EQ(split_id, healthy->GetSplit());
+  EXPECT_EQ(split_id, crashed->GetSplit());
+  split_data = tab_strip->GetSplitData(split_id);
+  ASSERT_TRUE(split_data);
+  EXPECT_EQ(ordered_tabs, split_data->ListTabs());
+  EXPECT_EQ(split_tabs::SplitTabLayout::kStacked,
+            split_data->visual_data()->split_layout());
+  EXPECT_EQ(0.25, split_data->visual_data()->split_ratio());
+  EXPECT_EQ(
+      workspace_identifier,
+      workspace_controller->GetWorkspaceIdentifierForTab(healthy->GetHandle()));
+  EXPECT_EQ(
+      workspace_identifier,
+      workspace_controller->GetWorkspaceIdentifierForTab(crashed->GetHandle()));
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     crashed_identifier, "stacked", 0.25));
+  MultiContentsView* multi_contents = browser_view->multi_contents_view();
+  ASSERT_TRUE(multi_contents);
+  EXPECT_TRUE(multi_contents->IsInSplitView());
+  EXPECT_EQ(ordered_tabs[0]->GetContents(),
+            multi_contents->start_contents_view_for_testing()->web_contents());
+  EXPECT_EQ(ordered_tabs[1]->GetContents(),
+            multi_contents->end_contents_view_for_testing()->web_contents());
+  SadTabHelper* sad_tab_helper = SadTabHelper::From(crashed);
+  ASSERT_TRUE(sad_tab_helper);
+  ASSERT_TRUE(sad_tab_helper->sad_tab());
+  {
+    SadTabView* sad_tab_view =
+        FindSadTabViewForContents(browser_view, crashed_contents);
+    ASSERT_TRUE(sad_tab_view);
+    EXPECT_TRUE(sad_tab_view->GetWidget());
+    EXPECT_TRUE(sad_tab_view->IsDrawn());
+    EXPECT_FALSE(sad_tab_view->GetBoundsInScreen().IsEmpty());
+  }
+
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, healthy_row,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        healthy_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == healthy && view && view->HasFocus();
+  }));
+  ASSERT_TRUE(FocusKeyEvidenceInput(healthy_contents));
+  SendRendererKey(browser(), ui::VKEY_H, ui::EF_NONE, u'h');
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return KeyInputValue(healthy_contents) == "h"; }));
+
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, crashed_row,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    const auto snapshot = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+    SadTabView* current_sad_tab =
+        FindSadTabViewForContents(browser_view, crashed_contents);
+    return tab_strip->GetActiveTab() == crashed && snapshot &&
+           snapshot->split_active_tab_identifiers ==
+               std::vector<std::string>{crashed_identifier} &&
+           current_sad_tab && current_sad_tab->IsDrawn();
+  }));
+
+  // Chromium's SadTab keyboard-focus acceptance test is disabled on macOS.
+  // Keep this product journey scoped to exact rail selection and native SadTab
+  // anchoring, then prove page focus and input again after recovery.
+
+  chrome::Reload(browser(), WindowOpenDisposition::CURRENT_TAB);
+  ASSERT_TRUE(content::WaitForLoadStop(crashed_contents));
+  ASSERT_FALSE(crashed_contents->IsCrashed());
+  ASSERT_TRUE(crashed_contents->GetPrimaryMainFrame()->IsRenderFrameLive());
+  ASSERT_TRUE(crashed_contents->GetPrimaryMainFrame()
+                  ->GetProcess()
+                  ->IsInitializedAndNotDead());
+  sad_tab_helper = SadTabHelper::From(crashed);
+  ASSERT_TRUE(sad_tab_helper);
+  EXPECT_EQ(nullptr, sad_tab_helper->sad_tab());
+  EXPECT_EQ(nullptr, FindSadTabViewForContents(browser_view, crashed_contents));
+  EXPECT_EQ(healthy_contents, healthy->GetContents());
+  EXPECT_EQ(crashed_contents, crashed->GetContents());
+  EXPECT_EQ(split_id, healthy->GetSplit());
+  EXPECT_EQ(split_id, crashed->GetSplit());
+  split_data = tab_strip->GetSplitData(split_id);
+  ASSERT_TRUE(split_data);
+  EXPECT_EQ(ordered_tabs, split_data->ListTabs());
+  EXPECT_EQ(split_tabs::SplitTabLayout::kStacked,
+            split_data->visual_data()->split_layout());
+  EXPECT_EQ(0.25, split_data->visual_data()->split_ratio());
+  EXPECT_EQ(first_identifier,
+            ProductIdentifierForTab(browser(), ordered_tabs[0]));
+  EXPECT_EQ(second_identifier,
+            ProductIdentifierForTab(browser(), ordered_tabs[1]));
+  EXPECT_EQ(
+      workspace_identifier,
+      workspace_controller->GetWorkspaceIdentifierForTab(healthy->GetHandle()));
+  EXPECT_EQ(
+      workspace_identifier,
+      workspace_controller->GetWorkspaceIdentifierForTab(crashed->GetHandle()));
+  EXPECT_EQ(crashed, tab_strip->GetActiveTab());
+  ASSERT_TRUE(RailProjectsExactSplit(rail, first_identifier, second_identifier,
+                                     crashed_identifier, "stacked", 0.25));
+  EXPECT_TRUE(multi_contents->IsInSplitView());
+  EXPECT_EQ(ordered_tabs[0]->GetContents(),
+            multi_contents->start_contents_view_for_testing()->web_contents());
+  EXPECT_EQ(ordered_tabs[1]->GetContents(),
+            multi_contents->end_contents_view_for_testing()->web_contents());
+  EXPECT_EQ("h", KeyInputValue(healthy_contents));
+
+  ASSERT_TRUE(ResetKeyEvidence(crashed_contents, /*focus_input=*/false));
+  ASSERT_TRUE(limitless::PerformSwiftUIAccessibilityActionForTesting(
+      rail, crashed_row,
+      limitless::SwiftUIAccessibilityActionForTesting::kPress));
+  ASSERT_TRUE(WaitForCondition([&]() {
+    content::RenderWidgetHostView* view =
+        crashed_contents->GetRenderWidgetHostView();
+    return tab_strip->GetActiveTab() == crashed && view && view->HasFocus();
+  }));
+  ASSERT_TRUE(FocusKeyEvidenceInput(crashed_contents));
+  SendRendererKey(browser(), ui::VKEY_R, ui::EF_NONE, u'r');
+  ASSERT_TRUE(WaitForCondition(
+      [&]() { return KeyInputValue(crashed_contents) == "r"; }));
+  EXPECT_EQ("h", KeyInputValue(healthy_contents));
 }
 
 IN_PROC_BROWSER_TEST_F(

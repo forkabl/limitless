@@ -40,7 +40,7 @@ accessibility, hardware-input, or IME gate.
 | 7. Fuzzy tab and history search | Chromium search substrate only | One query returns separated live-tab and history matches, activates the right target, and never leaks another profile or incognito history. |
 | 8. Command+Z reopens a closed tab | Missing; restore command exists | Non-editable browser chrome restores the exact tab while text fields and editable pages retain normal Undo. |
 | 9. No Google password manager | Missing and contradicted by retained defaults | Fresh and migrated profiles expose no Google password-manager save, fill, generation, store, sync, or settings path while approved WebAuthn, HTTP auth, and third-party manager behavior still works. |
-| 10. Herdr-easy split panes | Native baseline and clean restart are green: real Chromium tabs create, focus, resize, reorient, swap, unsplit, reconcile with workspace policy, and restore exact membership, order, layout, ratio, selection, and workspace association through sharp lazy controls; hostile lifecycle, native drag, and external UI gates remain open | Prove prompt, fullscreen, crash, teardown, hostile-window, transfer, hardware input, VoiceOver, AX, IME, and exact-window pixels. |
+| 10. Herdr-easy split panes | Native baseline, clean restart, exact prompt anchoring, and controlled renderer crash/reload recovery are green; the tabless shell no longer crashes on native fullscreen entry, while the environment still blocks completion at the same waiter as stock Chromium | Prove teardown, hostile-window, supported transfer, external fullscreen, hardware input, VoiceOver, AX, IME, and exact-window pixels. |
 | 11. Herdr for browsers | Display-only presence, the first Leader command map, real browser workspaces, and the first two-pane browser journey exist; shared command settings and agent authorization remain missing | Complete the split lifecycle gates, then expose reviewed split commands through the shared typed command and settings planes. |
 | 12. AI-compatible, not intrusive | Current-session Herdr presence is visible without controls; authentication, browser authorization, profile scope, revocation, and audit remain missing | Authenticated agents are optional, visible only when present, explicitly scoped, revocable, isolated by profile, and fully audited. |
 | 13. Link Peek | Missing | A transient browser-owned page shows trustworthy origin, handles hostile behaviors, promotes without reload, and dismisses without session pollution. |
@@ -141,8 +141,11 @@ workspace movement, strict target validation, and a lazy linear native control
 surface. Clean PRE/post restart now resolves new live tabs only by product UUID
 and proves exact pair order, both layouts, 25/50/75 ratios, selected-page input,
 workspace precedence, malformed metadata recovery, and duplicate UUID repair.
-Next prove prompt anchoring, fullscreen, page crash, teardown, hostile-window,
-and supported cross-window transfer. Then extend to
+Prompt anchoring and controlled renderer crash/reload recovery are now green.
+The tabless shell's native fullscreen entry no longer crashes, but completion
+remains an external red gate because the identical stock Chromium control
+stalls in this environment. Next prove teardown, hostile-window, and supported
+cross-window transfer. Then extend to
 recursive Herdr layouts if required to fulfill the product behavior, preserving
 Chromium ownership of every underlying tab.
 
@@ -259,9 +262,10 @@ UUID, dissolves only the now cross-workspace pair, and preserves the otherwise
 valid native pair. Limitless persists no split identifier, page, ratio, order,
 or layout state.
 
-The immediate continuation is prompt, fullscreen, page-crash, teardown,
-hostile-window, private/popup, and supported transfer split journeys. The
-current Mac arm64 native system-DnD harness cannot reach destination active-drag
+The immediate continuation is teardown, hostile-window, private/popup, and
+supported transfer split journeys. Native fullscreen completion remains an
+external red gate alongside the Mac arm64 system-DnD harness, which cannot
+reach destination active-drag
 even in established Chromium controls, so that external drag gate remains red
 while deterministic lifecycle and projection coverage stays green. The shared
 command and persistent settings planes remain the next cross-cutting

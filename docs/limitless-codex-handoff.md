@@ -64,10 +64,12 @@ A clean PRE/post process restart restores three pairs across two workspaces with
 exact product UUID membership, authoritative order, both layouts, 25/50/75
 ratios, selected-page input routing, and hostile product-metadata recovery.
 Limitless persists no split model. The next product-facing priority from
-`docs/features.md` is the remaining hostile split lifecycle: prompt,
-fullscreen, page crash, teardown, private and popup windows, and supported
-cross-window transfer. Do not replace this ordering with the historical phase
-text below when continuing work.
+`docs/features.md` is the remaining hostile split lifecycle. Prompt anchoring
+and controlled renderer crash/reload recovery are green. The tabless shell no
+longer crashes on native fullscreen entry, while completion remains externally
+red at the same waiter as stock Chromium. Continue with teardown, private and
+popup windows, and supported cross-window transfer. Do not replace this
+ordering with the historical phase text below when continuing work.
 
 ## Fixed project context
 

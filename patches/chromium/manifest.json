@@ -346,6 +346,34 @@
         "Tab-modal dialogs stop using NativeWebContentsModalDialogManagerViews on macOS."
       ],
       "removal_condition": "Remove this patch when Chromium reactivates a visible macOS child modal through its supported FocusTopmostDialog path after the parent window has taken key focus."
+    },
+    {
+      "file": "0012-macos-immersive-tab-overlay-safety.patch",
+      "sha256": "d1910ff4df58e4d0efdce6f0b53832001eb603d55d7b6082a538f857d9093e4e",
+      "upstream_files": [
+        "chrome/browser/ui/views/frame/immersive_mode_controller_mac.mm"
+      ],
+      "upstream_symbols": [
+        "ImmersiveModeControllerMac::SetEnabled",
+        "ImmersiveModeControllerMac::OnViewBoundsChanged"
+      ],
+      "limitless_targets": [
+        "$limitless_root/build/chromium:swiftui_browser_tests",
+        "$limitless_root/build/chromium:swiftui_rail"
+      ],
+      "tests": [
+        "//chrome/test:browser_tests --gtest_filter=LimitlessSwiftUIBrowserTest.NativeBrowserFullscreenPreservesExactSplitProjectionAndPaneFocus; the pre-patch zero-size crash is fixed, but this environment times out at the same native transition waiter as stock Chromium",
+        "//chrome/test:interactive_ui_tests --gtest_filter=ImmersiveModeControllerMacInteractiveTest.ToggleFullscreenWithVerticalTabstrip:ImmersiveModeControllerMacInteractiveTest.ToggleHorizontalVerticalTabLayout:ImmersiveModeControllerMacInteractiveTest.HandlesOverlayWidgetDestruction",
+        "//chrome/test:interactive_ui_tests --gtest_filter=ImmersiveModeControllerMacInteractiveTest.ToggleFullscreen; retained stock horizontal-fullscreen control remains an external red gate in this environment"
+      ],
+      "conflict_signals": [
+        "Separate macOS tab-overlay creation, resize, or cleanup moves outside ImmersiveModeControllerMac::SetEnabled or OnViewBoundsChanged.",
+        "BrowserView::tab_strip_view or TabStripRegionView::GetTabStripView no longer distinguishes an initialized horizontal tab view from an intentionally omitted one.",
+        "tab_widget_height_ no longer remains zero when no separate tab overlay was hosted.",
+        "EnableImmersiveFullscreen stops accepting a zero tab native widget identifier to mean no separate tab overlay.",
+        "Chromium adds an equivalent supported predicate for actual horizontal tab-overlay eligibility."
+      ],
+      "removal_condition": "Remove this patch when Chromium's macOS immersive controller natively distinguishes a tab-capable window from one with an initialized horizontal tab view and skips separate-tab-overlay entry, resize, and exit work when that view is absent."
     }
   ]
 }

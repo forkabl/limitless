@@ -19,10 +19,11 @@ product-owned, per-window `SplitPaneController` may use the richer public
 `TabStripModel` split APIs and observe `OnSplitTabChanged` for layout, ratio,
 order, membership, and transfer changes that `TabListInterface` does not
 expose. This direct dependency stays isolated in the adapter and needs no
-product-specific mutation API. Three independent generic Chromium fixes remain
+product-specific mutation API. Four independent generic Chromium fixes remain
 in the series: hostile-session ratio validation, the desktop Views
-drag-completion observer described below, and macOS child-modal reactivation
-through the existing topmost-dialog focus contract. They are exported as
+drag-completion observer described below, macOS child-modal reactivation
+through the existing topmost-dialog focus contract, and macOS immersive-mode
+handling for an intentionally absent horizontal tab view. They are exported as
 separate patches with separate removal conditions and tests.
 
 The adapter stores only its window/model lifetime references. Every snapshot
@@ -304,10 +305,18 @@ product metadata, and duplicate product tab UUID repair. The first
 hostile-lifecycle checkpoint adds real before-unload cancel and accept
 behavior, exact pane-hosted JavaScript prompt focus, renderer input after
 dismissal, focus-controller destruction guards, and workspace-controller
-destruction during split reconciliation. Follow-up bounded journeys must cover
-the remaining hostile multiwindow, regular-profile, cross-profile, private,
-popup, teardown, page-crash, and fullscreen cases without counting unrelated
-workspace-only coverage as split acceptance.
+destruction during split reconciliation. Controlled renderer termination now
+proves that Chromium's SadTab remains anchored in the exact split, the healthy
+pane remains live, reload preserves all authoritative split and workspace
+state, and the recovered page receives focus and synthesized input. macOS
+SadTab keyboard focus remains an explicit upstream red gate. The real
+fullscreen path no longer crashes while creating an absent horizontal-tab
+overlay, but native transition completion remains externally red because the
+identical stock Chromium control stalls in the same environment. Follow-up
+bounded journeys must cover the remaining hostile multiwindow,
+regular-profile, cross-profile, private, popup, teardown, and supported
+transfer cases without counting unrelated workspace-only coverage as split
+acceptance.
 
 The tests may inspect `MultiContentsView` and Chromium model state after the
 native action, but must not use those internals to perform the user action.
