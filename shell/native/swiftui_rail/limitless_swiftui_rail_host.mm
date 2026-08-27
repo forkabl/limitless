@@ -41,6 +41,7 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "shell/agents/agent_presence_registry.h"
 #include "shell/commands/limitless_command_registry.h"
+#include "shell/commands/limitless_command_window_binding.h"
 #include "shell/control_plane/limitless_running_profile_control_registry.h"
 #include "shell/shortcuts/limitless_command_dispatcher_delegate_mac.h"
 #include "shell/shortcuts/limitless_leader_shortcut_controller.h"
@@ -461,6 +462,14 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
                                     ProductCommandExecutionStatus::kFailed};
             },
             weak_this));
+    command_window_binding_ = std::make_unique<ProductCommandWindowBinding>(
+        command_registry_->GetWeakPtr(),
+        base::BindRepeating(
+            [](base::WeakPtr<SwiftUITabRailHost> host)
+                -> std::optional<ProductCommandWindowState> {
+              return host ? host->QueryProductWindowState() : std::nullopt;
+            },
+            weak_this));
     const bool leader_enabled =
         AreLeaderShortcutsEnabled(*base::CommandLine::ForCurrentProcess());
     leader_controller_ = std::make_unique<LeaderShortcutController>(
@@ -543,11 +552,12 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
 
   void OnBrowserDidClose(BrowserWindowInterface* browser_window) {
     leader_controller_->Stop();
+    preference_registration_.reset();
+    command_window_binding_.reset();
     command_registry_.reset();
     StopObservingAgentPresence();
     split_controller_->Stop();
     workspace_controller_->Stop();
-    preference_registration_.reset();
     tab_list_ = nullptr;
     browser_window_ = nullptr;
     title_observers_.clear();
@@ -818,6 +828,45 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
     snapshot.leader_native_delegate_requested =
         leader_native_delegate_requested_;
     return snapshot;
+  }
+
+  std::optional<ProductCommandWindowState> QueryProductWindowState() const {
+    if (!browser_window_ || !workspace_controller_ ||
+        browser_window_->IsDeleteScheduled()) {
+      return std::nullopt;
+    }
+    const WorkspaceWindowSnapshot workspace =
+        workspace_controller_->GetSnapshot();
+    ProductCommandWindowState state;
+    state.window_id = workspace.window_identifier;
+    state.active_workspace_id = workspace.active_workspace_identifier;
+    for (const WorkspaceTabProjection& tab :
+         workspace.visible_tab_projections) {
+      state.visible_tab_ids.push_back(tab.identifier);
+      if (workspace.active_tab == tab.handle) {
+        state.active_tab_id = tab.identifier;
+      }
+    }
+    state.is_active = browser_window_->IsActive();
+    if (split_controller_) {
+      const SplitPaneWindowSnapshot split_snapshot =
+          split_controller_->GetSnapshot();
+      if (split_snapshot.window_identifier != workspace.window_identifier) {
+        return std::nullopt;
+      }
+      for (const SplitPaneProjection& split : split_snapshot.splits) {
+        state.splits.push_back(
+            {.split_instance_id = split.split_instance_identifier,
+             .first_tab_id = split.first_tab_identifier,
+             .second_tab_id = split.second_tab_identifier,
+             .active_tab_id = split.active_tab_identifier,
+             .layout = split.layout == SplitPaneLayout::kStacked
+                           ? ProductCommandSplitLayout::kStacked
+                           : ProductCommandSplitLayout::kSideBySide,
+             .ratio = split.ratio});
+      }
+    }
+    return state;
   }
 
   ProductCommandQueryResult QueryProductCommand(
@@ -1755,6 +1804,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
   std::unique_ptr<SplitPaneController> split_controller_;
   std::unique_ptr<LeaderShortcutController> leader_controller_;
   std::unique_ptr<ProductCommandRegistry> command_registry_;
+  std::unique_ptr<ProductCommandWindowBinding> command_window_binding_;
   std::unique_ptr<RunningProfileControlRegistry::Registration>
       preference_registration_;
   base::CallbackListSubscription browser_did_close_subscription_;

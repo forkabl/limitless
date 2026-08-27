@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "base/functional/callback.h"
+#include "base/memory/weak_ptr.h"
 
 namespace limitless {
 
@@ -190,6 +191,7 @@ class ProductCommandRegistry {
   ProductCommandRegistry(const ProductCommandRegistry&) = delete;
   ProductCommandRegistry& operator=(const ProductCommandRegistry&) = delete;
   ~ProductCommandRegistry();
+  base::WeakPtr<ProductCommandRegistry> GetWeakPtr();
 
   ProductCommandQueryResult Query(
       const ProductCommandInvocation& invocation) const;
@@ -204,6 +206,7 @@ class ProductCommandRegistry {
  private:
   QueryCallback query_;
   ExecuteCallback execute_;
+  base::WeakPtrFactory<ProductCommandRegistry> weak_factory_{this};
 };
 
 }  // namespace limitless

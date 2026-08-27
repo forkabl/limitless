@@ -39,9 +39,8 @@ class ProductCommandWindowBinding {
  public:
   using StateCallback =
       base::RepeatingCallback<std::optional<ProductCommandWindowState>()>;
-  ProductCommandWindowBinding(StateCallback state,
-                              ProductCommandRegistry::QueryCallback query,
-                              ProductCommandRegistry::ExecuteCallback execute);
+  ProductCommandWindowBinding(base::WeakPtr<ProductCommandRegistry> registry,
+                              StateCallback state);
   ProductCommandWindowBinding(const ProductCommandWindowBinding&) = delete;
   ProductCommandWindowBinding& operator=(const ProductCommandWindowBinding&) =
       delete;
@@ -56,7 +55,7 @@ class ProductCommandWindowBinding {
 
  private:
   StateCallback state_;
-  ProductCommandRegistry registry_;
+  base::WeakPtr<ProductCommandRegistry> registry_;
   base::WeakPtrFactory<ProductCommandWindowBinding> weak_factory_{this};
 };
 

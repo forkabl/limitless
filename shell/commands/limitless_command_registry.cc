@@ -200,6 +200,10 @@ ProductCommandRegistry::ProductCommandRegistry(QueryCallback query,
 
 ProductCommandRegistry::~ProductCommandRegistry() = default;
 
+base::WeakPtr<ProductCommandRegistry> ProductCommandRegistry::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
 ProductCommandQueryResult ProductCommandRegistry::Query(
     const ProductCommandInvocation& invocation) const {
   const ProductCommandValidationStatus validation =

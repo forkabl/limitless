@@ -11,11 +11,10 @@
 namespace limitless {
 
 ProductCommandWindowBinding::ProductCommandWindowBinding(
-    StateCallback state,
-    ProductCommandRegistry::QueryCallback query,
-    ProductCommandRegistry::ExecuteCallback execute)
-    : state_(std::move(state)),
-      registry_(std::move(query), std::move(execute)) {
+    base::WeakPtr<ProductCommandRegistry> registry,
+    StateCallback state)
+    : state_(std::move(state)), registry_(std::move(registry)) {
+  CHECK(registry_);
   CHECK(state_);
 }
 
@@ -34,14 +33,22 @@ std::optional<ProductCommandWindowState> ProductCommandWindowBinding::GetState()
 
 ProductCommandQueryResult ProductCommandWindowBinding::Query(
     const ProductCommandInvocation& invocation) const {
-  return registry_.Query(invocation);
+  base::WeakPtr<ProductCommandRegistry> registry = registry_;
+  return registry ? registry->Query(invocation)
+                  : ProductCommandQueryResult{
+                        .status = ProductCommandQueryStatus::kDisabled};
 }
 
 ProductCommandExecutionResult ProductCommandWindowBinding::ExecuteGuarded(
     const ProductCommandInvocation& invocation,
     ProductCommandOrigin origin,
     ProductCommandRegistry::PreExecuteGuard guard) const {
-  return registry_.ExecuteGuarded(invocation, origin, std::move(guard));
+  base::WeakPtr<ProductCommandRegistry> registry = registry_;
+  return registry
+             ? registry->ExecuteGuarded(invocation, origin, std::move(guard))
+             : ProductCommandExecutionResult{
+                   .status =
+                       ProductCommandExecutionStatus::kPreconditionFailed};
 }
 
 }  // namespace limitless

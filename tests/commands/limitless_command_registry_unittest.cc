@@ -400,20 +400,20 @@ TEST(LimitlessCommandRegistryTest,
 
 TEST(ProductCommandWindowBindingTest, ReturnsAbsentWindowState) {
   int state_calls = 0;
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{};
+      }),
+      base::BindLambdaForTesting(
+          [](const ProductCommandInvocation&, ProductCommandOrigin) {
+            return ProductCommandExecutionResult{};
+          }));
   ProductCommandWindowBinding binding(
+      registry.GetWeakPtr(),
       base::BindLambdaForTesting(
           [&]() -> std::optional<ProductCommandWindowState> {
             ++state_calls;
             return std::nullopt;
-          }),
-      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
-        return ProductCommandQueryResult{
-            .status = ProductCommandQueryStatus::kDisabled};
-      }),
-      base::BindLambdaForTesting(
-          [](const ProductCommandInvocation&, ProductCommandOrigin) {
-            return ProductCommandExecutionResult{
-                .status = ProductCommandExecutionStatus::kSucceeded};
           }));
   EXPECT_FALSE(binding.GetState());
   EXPECT_EQ(1, state_calls);
@@ -422,11 +422,7 @@ TEST(ProductCommandWindowBindingTest, ReturnsAbsentWindowState) {
 TEST(ProductCommandWindowBindingTest, DelegatesGuardedExecution) {
   std::string order;
   ProductCommandOrigin seen = ProductCommandOrigin::kNativeUi;
-  ProductCommandWindowBinding binding(
-      base::BindLambdaForTesting(
-          []() -> std::optional<ProductCommandWindowState> {
-            return ProductCommandWindowState{.window_id = kWindowId};
-          }),
+  ProductCommandRegistry registry(
       base::BindLambdaForTesting([&](const ProductCommandInvocation&) {
         order += "q";
         return ProductCommandQueryResult{
@@ -438,6 +434,12 @@ TEST(ProductCommandWindowBindingTest, DelegatesGuardedExecution) {
             seen = origin;
             return ProductCommandExecutionResult{
                 .status = ProductCommandExecutionStatus::kSucceeded};
+          }));
+  ProductCommandWindowBinding binding(
+      registry.GetWeakPtr(),
+      base::BindLambdaForTesting(
+          []() -> std::optional<ProductCommandWindowState> {
+            return ProductCommandWindowState{.window_id = kWindowId};
           }));
 
   EXPECT_EQ(
@@ -458,19 +460,19 @@ TEST(ProductCommandWindowBindingTest, DelegatesGuardedExecution) {
 TEST(ProductCommandWindowBindingTest, WeakPointerInvalidatesAfterDestruction) {
   base::WeakPtr<ProductCommandWindowBinding> weak;
   {
-    auto binding = std::make_unique<ProductCommandWindowBinding>(
-        base::BindLambdaForTesting(
-            []() -> std::optional<ProductCommandWindowState> {
-              return ProductCommandWindowState{.window_id = kWindowId};
-            }),
+    ProductCommandRegistry registry(
         base::BindLambdaForTesting([](const ProductCommandInvocation&) {
-          return ProductCommandQueryResult{
-              .status = ProductCommandQueryStatus::kDisabled};
+          return ProductCommandQueryResult{};
         }),
         base::BindLambdaForTesting(
             [](const ProductCommandInvocation&, ProductCommandOrigin) {
-              return ProductCommandExecutionResult{
-                  .status = ProductCommandExecutionStatus::kSucceeded};
+              return ProductCommandExecutionResult{};
+            }));
+    auto binding = std::make_unique<ProductCommandWindowBinding>(
+        registry.GetWeakPtr(),
+        base::BindLambdaForTesting(
+            []() -> std::optional<ProductCommandWindowState> {
+              return ProductCommandWindowState{.window_id = kWindowId};
             }));
     weak = binding->GetWeakPtr();
     EXPECT_TRUE(weak);
