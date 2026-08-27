@@ -141,17 +141,25 @@ private func externalAXSessionUnavailable(excluding targetPID: pid_t) -> Bool {
     owners.insert(pid)
     if owners.count >= 4 { break }
   }
+  var controls = 0
   var unusable = 0
   for pid in owners {
     let app = AXUIElementCreateApplication(pid)
+    guard let native = try? nativeWindows(ownerPID: pid), !native.isEmpty else { continue }
     guard let windows = copyAttribute(app, kAXWindowsAttribute),
-          CFGetTypeID(windows) == CFArrayGetTypeID() else { unusable += 1; continue }
+          CFGetTypeID(windows) == CFArrayGetTypeID() else { continue }
     let elements = elements(from: windows)
-    if elements.isEmpty || elements.allSatisfy({ stringAttribute($0, kAXRoleAttribute) != kAXWindowRole }) {
+    let pidCorrect = elements.filter { element in
+        var owner: pid_t = 0
+        return AXUIElementGetPid(element, &owner) == .success && owner == pid
+      }
+    guard !pidCorrect.isEmpty else { continue }
+    controls += 1
+    if pidCorrect.allSatisfy({ stringAttribute($0, kAXRoleAttribute) != kAXWindowRole }) {
       unusable += 1
     }
   }
-  return owners.count >= 2 && unusable == owners.count
+  return controls >= 2 && unusable == controls
 }
 
 private func rawWindowRecordExists(
@@ -548,6 +556,7 @@ private func waitForBoundary(
   var lastWindowCount = 0
   var lastAXWindowCount = 0
   var lastAXWindowRole = "missing"
+  var wrongRootSamples = 0
   while Date() < deadline {
     let windows = try nativeWindows(ownerPID: pid)
     lastWindowCount = windows.count
@@ -555,6 +564,11 @@ private func waitForBoundary(
     lastAXWindowCount = axWindows.count
     if axWindows.count == 1 {
       lastAXWindowRole = stringAttribute(axWindows[0], kAXRoleAttribute) ?? "missing"
+      wrongRootSamples = lastAXWindowRole == kAXWindowRole ? 0 : wrongRootSamples + 1
+    }
+    if windows.count == 1 && wrongRootSamples >= 3 &&
+       externalAXSessionUnavailable(excluding: pid) {
+      throw ProbeFailure(description: "AX session unavailable: multiple visible applications returned no AXWindow; unlock the session and retry")
     }
     if windows.count == 1, axWindows.count == 1, lastAXWindowRole == kAXWindowRole,
       let boundary = findBoundaryElements(
