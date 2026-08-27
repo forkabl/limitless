@@ -518,6 +518,76 @@ TEST(ProductCommandWindowBindingTest, ExpiredRegistryFailsClosed) {
   EXPECT_EQ(0, executes);
 }
 
+TEST(ProductCommandWindowBindingTest, MalformedStateFailsClosed) {
+  ProductCommandRegistry registry(
+      base::BindLambdaForTesting([](const ProductCommandInvocation&) {
+        return ProductCommandQueryResult{};
+      }),
+      base::BindLambdaForTesting(
+          [](const ProductCommandInvocation&, ProductCommandOrigin) {
+            return ProductCommandExecutionResult{};
+          }));
+  ProductCommandWindowBinding binding(
+      registry.GetWeakPtr(),
+      base::BindLambdaForTesting(
+          []() -> std::optional<ProductCommandWindowState> {
+            return ProductCommandWindowState{.window_id = "malformed"};
+          }));
+  EXPECT_FALSE(binding.GetState());
+}
+
+TEST(ProductCommandWindowBindingTest,
+     WindowStateValidatorRejectsMalformedShapes) {
+  ProductCommandWindowState valid{
+      .window_id = kWindowId,
+      .active_workspace_id = kWindowId,
+      .visible_tab_ids = {kFirstTabId, kSecondTabId},
+      .active_tab_id = kFirstTabId};
+  EXPECT_TRUE(ValidateProductCommandWindowState(valid));
+  ProductCommandWindowState duplicate_tab = valid;
+  duplicate_tab.visible_tab_ids.push_back(kFirstTabId);
+  EXPECT_FALSE(ValidateProductCommandWindowState(duplicate_tab));
+  ProductCommandWindowState missing_active = valid;
+  missing_active.active_tab_id = kForeignTabId;
+  EXPECT_FALSE(ValidateProductCommandWindowState(missing_active));
+  ProductCommandWindowState bad_split = valid;
+  bad_split.splits.push_back({.split_instance_id = kWindowId,
+                              .first_tab_id = kFirstTabId,
+                              .second_tab_id = kForeignTabId,
+                              .ratio = 0.5});
+  EXPECT_FALSE(ValidateProductCommandWindowState(bad_split));
+  ProductCommandWindowState bad_ratio = valid;
+  bad_ratio.splits.push_back({.split_instance_id = kWindowId,
+                              .first_tab_id = kFirstTabId,
+                              .second_tab_id = kSecondTabId,
+                              .ratio = 0.9});
+  EXPECT_FALSE(ValidateProductCommandWindowState(bad_ratio));
+  ProductCommandWindowState valid_split = valid;
+  valid_split.splits.push_back({.split_instance_id = kWindowId,
+                                .first_tab_id = kFirstTabId,
+                                .second_tab_id = kSecondTabId,
+                                .active_tab_id = kFirstTabId,
+                                .ratio = 0.25});
+  EXPECT_TRUE(ValidateProductCommandWindowState(valid_split));
+  valid_split.splits[0].ratio = 0.75;
+  EXPECT_TRUE(ValidateProductCommandWindowState(valid_split));
+  valid_split.splits[0].ratio = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(ValidateProductCommandWindowState(valid_split));
+  ProductCommandWindowState duplicate_split = valid;
+  duplicate_split.splits = {valid_split.splits[0], valid_split.splits[0]};
+  duplicate_split.splits[0].ratio = 0.5;
+  EXPECT_FALSE(ValidateProductCommandWindowState(duplicate_split));
+  ProductCommandWindowState same_member = valid;
+  same_member.splits.push_back({.split_instance_id = kWindowId,
+                                .first_tab_id = kFirstTabId,
+                                .second_tab_id = kFirstTabId});
+  EXPECT_FALSE(ValidateProductCommandWindowState(same_member));
+  ProductCommandWindowState active_outside = valid_split;
+  active_outside.splits[0].active_tab_id = kSecondTabId;
+  active_outside.active_tab_id = kFirstTabId;
+  EXPECT_FALSE(ValidateProductCommandWindowState(active_outside));
+}
+
 TEST(LimitlessCommandRegistryTest, LiveRequeryRejectsChangedState) {
   bool enabled = true;
   int guards = 0;
