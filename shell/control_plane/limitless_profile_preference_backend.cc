@@ -176,7 +176,7 @@ uint64_t ProfilePreferenceControlBackend::AppendAuditRecord(
     ScopedListPrefUpdate audit(prefs_, kPreferenceAuditRecordsPref);
     audit->Append(PreferenceAuditRecordToValue(stored_record));
     while (audit->size() > kMaximumPersistedAuditRecords)
-      audit->Erase(audit->begin());
+      audit->erase(audit->begin());
   }
   prefs_->SetInt64(kPreferenceAuditSequencePref, sequence);
   return static_cast<uint64_t>(sequence);
