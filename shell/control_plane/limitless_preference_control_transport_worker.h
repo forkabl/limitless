@@ -95,6 +95,7 @@ class PreferenceControlTransportWorker {
     base::TimeDelta io_timeout_for_testing;
     base::RepeatingCallback<void(int)> accepted_fd_for_testing;
     base::RepeatingClosure entering_accept_wait_for_testing;
+    base::RepeatingCallback<bool()> should_exit_run_for_testing;
   };
   enum class WorkerPrepareStatus {
     kSuccess,
@@ -104,7 +105,8 @@ class PreferenceControlTransportWorker {
     kSocket,
     kCredential,
     kDescriptor,
-    kCancellationChannel
+    kCancellationChannel,
+    kPathTooLong
   };
   struct PrepareResult {
     bool succeeded = false;
@@ -143,6 +145,7 @@ class PreferenceControlTransportWorker {
   base::ScopedFD listener_;
   base::ScopedFD runtime_directory_fd_;
   base::ScopedFD bound_socket_directory_fd_;
+  std::string socket_basename_;
   base::ScopedFD cancellation_reader_;
   base::ScopedFD credential_identity_fd_;
   base::ScopedFD descriptor_identity_fd_;
@@ -151,6 +154,7 @@ class PreferenceControlTransportWorker {
   bool owns_credential_ = false;
   bool owns_descriptor_ = false;
   ArtifactIdentity runtime_directory_identity_;
+  ArtifactIdentity socket_directory_identity_;
   ArtifactIdentity socket_identity_, credential_identity_, descriptor_identity_;
 };
 

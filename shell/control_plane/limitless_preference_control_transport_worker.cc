@@ -24,6 +24,7 @@
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "limitless_preference_control_protocol.h"
@@ -593,7 +594,43 @@ PreferenceControlTransportWorker::Prepare() {
   std::string socket_basename;
   std::string descriptor_basename;
   std::string credential_basename;
-  if (!GetArtifactBasename(inputs_.runtime_directory, inputs_.socket_path,
+  sockaddr_un address = {};
+  address.sun_family = AF_UNIX;
+  base::FilePath socket_directory = inputs_.runtime_directory;
+  if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) {
+    socket_directory =
+        base::FilePath(FILE_PATH_LITERAL("/tmp"))
+            .AppendASCII("limitless-" + base::NumberToString(geteuid()));
+    if (mkdir(socket_directory.value().c_str(), kPrivateDirectoryMode) != 0 &&
+        errno != EEXIST) {
+      return FailPrepare(WorkerPrepareStatus::kSocket);
+    }
+    base::ScopedFD socket_directory_fd(
+        open(socket_directory.value().c_str(),
+             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    struct stat socket_directory_stat = {};
+    if (!socket_directory_fd.is_valid() ||
+        fstat(socket_directory_fd.get(), &socket_directory_stat) != 0 ||
+        !S_ISDIR(socket_directory_stat.st_mode) ||
+        socket_directory_stat.st_uid != geteuid() ||
+        fchmod(socket_directory_fd.get(), kPrivateDirectoryMode) != 0 ||
+        fstat(socket_directory_fd.get(), &socket_directory_stat) != 0 ||
+        !S_ISDIR(socket_directory_stat.st_mode) ||
+        socket_directory_stat.st_uid != geteuid() ||
+        (socket_directory_stat.st_mode & 0777) != kPrivateDirectoryMode) {
+      return FailPrepare(WorkerPrepareStatus::kSocket);
+    }
+    socket_directory_identity_ = {socket_directory_stat.st_dev,
+                                  socket_directory_stat.st_ino};
+    const std::string short_name =
+        "s-" + inputs_.profile_id.substr(0, 12) + "-" + inputs_.instance_id;
+    inputs_.socket_path = socket_directory.AppendASCII(short_name);
+    result.socket_path = inputs_.socket_path;
+    if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) {
+      return FailPrepare(WorkerPrepareStatus::kPathTooLong);
+    }
+  }
+  if (!GetArtifactBasename(socket_directory, inputs_.socket_path,
                            &socket_basename) ||
       !GetArtifactBasename(inputs_.runtime_directory, inputs_.descriptor_path,
                            &descriptor_basename) ||
@@ -601,6 +638,7 @@ PreferenceControlTransportWorker::Prepare() {
                            &credential_basename)) {
     return FailPrepare(WorkerPrepareStatus::kRuntimeDirectory);
   }
+  socket_basename_ = socket_basename;
   listener_.reset(socket(AF_UNIX, SOCK_STREAM, 0));
   if (!listener_.is_valid()) {
     return FailPrepare(WorkerPrepareStatus::kSocket);
@@ -612,15 +650,26 @@ PreferenceControlTransportWorker::Prepare() {
       fcntl(listener_.get(), F_SETFL, status | O_NONBLOCK) != 0) {
     return FailPrepare(WorkerPrepareStatus::kSocket);
   }
-  sockaddr_un address = {};
-  address.sun_family = AF_UNIX;
   if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) {
     return FailPrepare(WorkerPrepareStatus::kSocket);
   }
   memcpy(address.sun_path, inputs_.socket_path.value().c_str(),
          inputs_.socket_path.value().size() + 1);
+  base::ScopedFD socket_parent_fd(
+      open(socket_directory.value().c_str(),
+           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+  struct stat socket_parent_stat = {};
+  if (!socket_parent_fd.is_valid() ||
+      fstat(socket_parent_fd.get(), &socket_parent_stat) != 0 ||
+      !S_ISDIR(socket_parent_stat.st_mode) ||
+      socket_parent_stat.st_uid != geteuid() ||
+      (socket_parent_stat.st_mode & 0777) != kPrivateDirectoryMode) {
+    return FailPrepare(WorkerPrepareStatus::kSocket);
+  }
+  socket_directory_identity_ = {socket_parent_stat.st_dev,
+                                socket_parent_stat.st_ino};
   const PathCheck socket_check =
-      CheckPathAt(runtime_directory_fd_.get(), socket_basename);
+      CheckPathAt(socket_parent_fd.get(), socket_basename);
   const PathCheck descriptor_check =
       CheckPathAt(runtime_directory_fd_.get(), descriptor_basename);
   const PathCheck credential_check =
@@ -639,14 +688,15 @@ PreferenceControlTransportWorker::Prepare() {
     inputs_.before_socket_bind_for_testing.Run();
   }
   base::ScopedFD pre_bind_runtime_directory_fd(
-      open(inputs_.runtime_directory.value().c_str(),
+      open(socket_directory.value().c_str(),
            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
   struct stat pre_bind_runtime_check = {};
   if (!pre_bind_runtime_directory_fd.is_valid() ||
       fstat(pre_bind_runtime_directory_fd.get(), &pre_bind_runtime_check) !=
           0 ||
       !StatMatchesIdentity(pre_bind_runtime_check, S_IFDIR,
-                           runtime_directory_identity_) ||
+                           socket_directory_identity_) ||
+      pre_bind_runtime_check.st_uid != geteuid() ||
       (pre_bind_runtime_check.st_mode & 0777) != kPrivateDirectoryMode) {
     return FailPrepare(WorkerPrepareStatus::kSocket);
   }
@@ -656,17 +706,17 @@ PreferenceControlTransportWorker::Prepare() {
     return FailPrepare(WorkerPrepareStatus::kSocket);
   }
 
-  if (ReadArtifactIdentityAt(runtime_directory_fd_.get(), socket_basename,
-                             S_IFSOCK, &socket_identity_)) {
+  if (ReadArtifactIdentityAt(socket_parent_fd.get(), socket_basename, S_IFSOCK,
+                             &socket_identity_)) {
     owns_socket_ = true;
     bound_socket_directory_fd_.reset(
-        fcntl(runtime_directory_fd_.get(), F_DUPFD_CLOEXEC, 0));
+        fcntl(socket_parent_fd.get(), F_DUPFD_CLOEXEC, 0));
     if (!bound_socket_directory_fd_.is_valid()) {
       return FailPrepare(WorkerPrepareStatus::kSocket);
     }
   } else {
     base::ScopedFD current_runtime_directory_fd(
-        open(inputs_.runtime_directory.value().c_str(),
+        open(socket_directory.value().c_str(),
              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if (!current_runtime_directory_fd.is_valid() ||
         !ReadArtifactIdentityAt(current_runtime_directory_fd.get(),
@@ -678,13 +728,14 @@ PreferenceControlTransportWorker::Prepare() {
   }
 
   base::ScopedFD current_runtime_directory_fd(
-      open(inputs_.runtime_directory.value().c_str(),
+      open(socket_directory.value().c_str(),
            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
   struct stat current_runtime_check = {};
   if (!current_runtime_directory_fd.is_valid() ||
       fstat(current_runtime_directory_fd.get(), &current_runtime_check) != 0 ||
       !StatMatchesIdentity(current_runtime_check, S_IFDIR,
-                           runtime_directory_identity_) ||
+                           socket_directory_identity_) ||
+      current_runtime_check.st_uid != geteuid() ||
       (current_runtime_check.st_mode & 0777) != kPrivateDirectoryMode) {
     return FailPrepare(WorkerPrepareStatus::kSocket);
   }
@@ -787,6 +838,10 @@ void PreferenceControlTransportWorker::Run(
   if (!published_ || !listener_.is_valid() ||
       !cancellation_reader_.is_valid() || !origin_task_runner ||
       origin_task_runner->RunsTasksInCurrentSequence() || handler.is_null()) {
+    return;
+  }
+  if (inputs_.should_exit_run_for_testing &&
+      inputs_.should_exit_run_for_testing.Run()) {
     return;
   }
   while (!cancellation_->cancelled.load(std::memory_order_acquire)) {
@@ -907,9 +962,8 @@ void PreferenceControlTransportWorker::Cleanup() {
                                       : runtime_directory_fd_.get();
   if (owns_socket_ && socket_directory_fd >= 0) {
     std::string socket_basename;
-    if (GetArtifactBasename(inputs_.runtime_directory, inputs_.socket_path,
-                            &socket_basename) &&
-        QuarantineOwnedArtifactAt(socket_directory_fd, socket_basename,
+    if (!socket_basename_.empty() &&
+        QuarantineOwnedArtifactAt(socket_directory_fd, socket_basename_,
                                   S_IFSOCK, socket_identity_, -1)) {
       FsyncNoIntr(socket_directory_fd);
     }
@@ -923,9 +977,11 @@ void PreferenceControlTransportWorker::Cleanup() {
   runtime_directory_fd_.reset();
   owns_socket_ = owns_descriptor_ = owns_credential_ = false;
   socket_identity_ = {};
+  socket_basename_.clear();
   credential_identity_ = {};
   descriptor_identity_ = {};
   runtime_directory_identity_ = {};
+  socket_directory_identity_ = {};
   published_ = false;
 }
 

@@ -11,7 +11,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstring>
+#include <memory>
+#include <utility>
 
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
@@ -86,6 +89,20 @@ DripFeedResult DripFeedFrame(const base::FilePath& socket_path) {
 class LimitlessPreferenceControlTransportHostileBrowserTest
     : public InProcessBrowserTest {};
 
+void QueueRecoveryAndStop(
+    PreferenceControlTransport* transport,
+    base::test::TestFuture<PreferenceControlTransportStartStatus>* recovery) {
+  transport->StartWhenStoppedAsync(recovery->GetCallback());
+  transport->Stop();
+}
+
+PreferenceControlTransportStartStatus StartTransport(
+    PreferenceControlTransport* transport) {
+  base::test::TestFuture<PreferenceControlTransportStartStatus> result;
+  transport->StartAsync(result.GetCallback());
+  return result.Take();
+}
+
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        DripFeedCannotExtendAbsoluteFrameDeadline) {
   base::ScopedAllowBlockingForTesting allow_blocking;
@@ -93,7 +110,8 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
-  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess,
+            StartTransport(&transport));
 
   base::test::TestFuture<DripFeedResult> result;
   base::ThreadPool::PostTaskAndReplyWithResult(
@@ -105,6 +123,10 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   EXPECT_GE(observed.elapsed, base::Seconds(1));
   EXPECT_LT(observed.elapsed, base::Seconds(4));
   transport.Stop();
+  EXPECT_EQ(PreferenceControlTransport::State::kStopping, transport.state());
+  ASSERT_TRUE(base::test::RunUntil([&transport] {
+    return transport.state() == PreferenceControlTransport::State::kStopped;
+  }));
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
@@ -113,8 +135,13 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   base::ScopedTempDir user_data_directory;
   ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
+  base::test::TestFuture<int> accepted_fd;
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
-  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
+  PreferenceControlTransport::TestingHooks testing_hooks;
+  testing_hooks.accepted_fd = accepted_fd.GetSequenceBoundRepeatingCallback();
+  transport.SetTestingHooksForTesting(std::move(testing_hooks));
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess,
+            StartTransport(&transport));
   const base::FilePath descriptor_path = transport.descriptor_path();
   const base::FilePath credential_path = transport.credential_path();
   const base::FilePath socket_path = transport.socket_path();
@@ -125,16 +152,19 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   ASSERT_EQ(static_cast<ssize_t>(sizeof(partial_header)),
             send(connection.get(), &partial_header, sizeof(partial_header),
                  MSG_NOSIGNAL));
-  ASSERT_TRUE(base::test::RunUntil([&transport] {
-    return transport.has_accepted_connection_for_testing();
-  }));
+  ASSERT_TRUE(accepted_fd.Wait());
+  EXPECT_GE(accepted_fd.Take(), 0);
 
   base::ElapsedTimer elapsed;
   transport.Stop();
-  EXPECT_LT(elapsed.Elapsed(), base::Seconds(1));
-  EXPECT_FALSE(base::PathExists(descriptor_path));
-  EXPECT_FALSE(base::PathExists(credential_path));
-  EXPECT_FALSE(base::PathExists(socket_path));
+  const base::TimeDelta stop_elapsed = elapsed.Elapsed();
+  EXPECT_EQ(PreferenceControlTransport::State::kStopping, transport.state());
+  EXPECT_LT(stop_elapsed, base::Seconds(1));
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return transport.state() == PreferenceControlTransport::State::kStopped &&
+           !base::PathExists(descriptor_path) &&
+           !base::PathExists(credential_path) && !base::PathExists(socket_path);
+  }));
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
@@ -144,11 +174,137 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
-  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess,
+            StartTransport(&transport));
 
   base::ElapsedTimer elapsed;
   transport.Stop();
-  EXPECT_LT(elapsed.Elapsed(), base::Seconds(1));
+  const base::TimeDelta stop_elapsed = elapsed.Elapsed();
+  EXPECT_EQ(PreferenceControlTransport::State::kStopping, transport.state());
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return transport.state() == PreferenceControlTransport::State::kStopped;
+  }));
+  EXPECT_LT(stop_elapsed, base::Seconds(1));
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
+                       UnexpectedRunExitUsesOneRestartBudget) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+  base::ScopedTempDir user_data_directory;
+  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  ProfilePreferenceControlBackend backend(browser()->GetProfile());
+  PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
+  PreferenceControlTransport::TestingHooks hooks;
+  auto attempts = std::make_shared<std::atomic<int>>(0);
+  hooks.should_exit_run = base::BindRepeating(
+      [](std::shared_ptr<std::atomic<int>> attempts) {
+        return attempts->fetch_add(1) == 0;
+      },
+      attempts);
+  transport.SetTestingHooksForTesting(std::move(hooks));
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess,
+            StartTransport(&transport));
+
+  ASSERT_TRUE(base::test::RunUntil([&transport, &attempts] {
+    return attempts->load() == 2 &&
+           transport.state() == PreferenceControlTransport::State::kReady;
+  }));
+  EXPECT_EQ(attempts->load(), 2);
+  transport.Stop();
+  ASSERT_TRUE(base::test::RunUntil([&transport] {
+    return transport.state() == PreferenceControlTransport::State::kStopped;
+  }));
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
+                       StopWhileStoppingCancelsQueuedRecovery) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+  base::ScopedTempDir user_data_directory;
+  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  ProfilePreferenceControlBackend backend(browser()->GetProfile());
+  PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
+  PreferenceControlTransport::TestingHooks hooks;
+  auto attempts = std::make_shared<std::atomic<int>>(0);
+  hooks.should_exit_run = base::BindRepeating(
+      [](std::shared_ptr<std::atomic<int>> attempts) {
+        attempts->fetch_add(1);
+        return true;
+      },
+      attempts);
+  base::test::TestFuture<PreferenceControlTransportStartStatus> recovery;
+  hooks.entered_stopping_after_unexpected_run_exit =
+      base::BindRepeating(&QueueRecoveryAndStop, &transport, &recovery);
+  transport.SetTestingHooksForTesting(std::move(hooks));
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess,
+            StartTransport(&transport));
+  ASSERT_TRUE(base::test::RunUntil([&transport] {
+    return transport.state() == PreferenceControlTransport::State::kStopped;
+  }));
+  EXPECT_EQ(PreferenceControlTransportStartStatus::kCancelled, recovery.Take());
+  EXPECT_EQ(attempts->load(), 1);
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
+                       ConsecutiveUnexpectedExitsExhaustRestartBudget) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+  base::ScopedTempDir dir;
+  ASSERT_TRUE(dir.CreateUniqueTempDir());
+  ProfilePreferenceControlBackend backend(browser()->GetProfile());
+  PreferenceControlTransport transport(&backend, dir.GetPath());
+  auto attempts = std::make_shared<std::atomic<int>>(0);
+  PreferenceControlTransport::TestingHooks hooks;
+  hooks.should_exit_run = base::BindRepeating(
+      [](std::shared_ptr<std::atomic<int>> attempts) {
+        return attempts->fetch_add(1) < 2;
+      },
+      attempts);
+  transport.SetTestingHooksForTesting(std::move(hooks));
+  ASSERT_EQ(StartTransport(&transport),
+            PreferenceControlTransportStartStatus::kSuccess);
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return attempts->load() == 2 &&
+           transport.state() == PreferenceControlTransport::State::kStopped;
+  }));
+  EXPECT_FALSE(base::PathExists(transport.socket_path()));
+  EXPECT_FALSE(base::PathExists(transport.credential_path()));
+  EXPECT_FALSE(base::PathExists(transport.descriptor_path()));
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
+                       QueuedRecoveryRearmsRestartBudget) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+  base::ScopedTempDir dir;
+  ASSERT_TRUE(dir.CreateUniqueTempDir());
+  ProfilePreferenceControlBackend backend(browser()->GetProfile());
+  PreferenceControlTransport transport(&backend, dir.GetPath());
+  auto attempts = std::make_shared<std::atomic<int>>(0);
+  PreferenceControlTransport::TestingHooks hooks;
+  hooks.should_exit_run = base::BindRepeating(
+      [](std::shared_ptr<std::atomic<int>> attempts) {
+        const int current = attempts->fetch_add(1) + 1;
+        return current == 1 || current == 3;
+      },
+      attempts);
+  transport.SetTestingHooksForTesting(std::move(hooks));
+  ASSERT_EQ(StartTransport(&transport),
+            PreferenceControlTransportStartStatus::kSuccess);
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return attempts->load() >= 2 &&
+           transport.state() == PreferenceControlTransport::State::kReady;
+  }));
+  transport.Stop();
+  ASSERT_EQ(PreferenceControlTransport::State::kStopping, transport.state());
+  base::test::TestFuture<PreferenceControlTransportStartStatus> recovery;
+  transport.StartWhenStoppedAsync(recovery.GetCallback());
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, recovery.Take());
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return attempts->load() == 4 &&
+           transport.state() == PreferenceControlTransport::State::kReady;
+  }));
+  transport.Stop();
+  ASSERT_TRUE(base::test::RunUntil([&] {
+    return transport.state() == PreferenceControlTransport::State::kStopped;
+  }));
 }
 
 }  // namespace

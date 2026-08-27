@@ -13,6 +13,8 @@
 #include "base/callback_list.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "limitless_preference_control_transport.h"
 #include "limitless_profile_preference_backend.h"
 
 class BrowserWindowInterface;
@@ -42,22 +44,26 @@ class RunningProfileControlRegistry {
    private:
     friend class RunningProfileControlRegistry;
 
-    Registration(RunningProfileControlRegistry* registry,
+    Registration(base::WeakPtr<RunningProfileControlRegistry> registry,
                  Profile* profile,
                  BrowserWindowInterface* browser_window,
+                 std::string instance_identifier,
                  base::RepeatingCallback<void(const EffectivePreferenceValue&)>
                      value_changed);
     void OnBrowserDidClose(BrowserWindowInterface* browser_window);
     void Reset();
 
-    raw_ptr<RunningProfileControlRegistry> registry_;
+    base::WeakPtr<RunningProfileControlRegistry> registry_;
     raw_ptr<Profile> profile_;
     raw_ptr<BrowserWindowInterface> browser_window_;
+    std::string instance_identifier_;
     base::CallbackListSubscription value_changed_subscription_;
     base::CallbackListSubscription browser_did_close_subscription_;
   };
 
   RunningProfileControlRegistry();
+  void SetTransportTestingHooksForTesting(
+      PreferenceControlTransport::TestingHooks hooks);
   RunningProfileControlRegistry(const RunningProfileControlRegistry&) = delete;
   RunningProfileControlRegistry& operator=(
       const RunningProfileControlRegistry&) = delete;
@@ -84,9 +90,16 @@ class RunningProfileControlRegistry {
   ProfileEntry* FindEntry(Profile* profile) const;
   ProfileEntry* FindEntry(std::string_view profile_identifier) const;
   void UnregisterWindow(Profile* profile,
-                        BrowserWindowInterface* browser_window);
+                        BrowserWindowInterface* browser_window,
+                        std::string_view instance_identifier);
+  void OnTransportReady(Profile* profile,
+                        std::string instance_identifier,
+                        bool initial_start,
+                        PreferenceControlTransportStartStatus status);
 
   std::vector<std::unique_ptr<ProfileEntry>> entries_;
+  PreferenceControlTransport::TestingHooks transport_testing_hooks_;
+  base::WeakPtrFactory<RunningProfileControlRegistry> weak_factory_{this};
 };
 
 RunningProfileControlRegistry& GetRunningProfileControlRegistry();

@@ -17,13 +17,14 @@
 namespace limitless {
 
 struct RunningProfileControlRegistry::ProfileEntry {
-  explicit ProfileEntry(Profile* profile)
+  ProfileEntry(Profile* profile,
+               PreferenceControlTransport::TestingHooks testing_hooks)
       : profile(profile),
         backend(profile,
                 base::BindRepeating(&ProfileEntry::NotifyValueChanged,
                                     base::Unretained(this))),
         transport(&backend, profile->GetPath().DirName()) {
-    transport_start_status = transport.Start();
+    transport.SetTestingHooksForTesting(std::move(testing_hooks));
   }
 
   void NotifyValueChanged(const EffectivePreferenceValue& value) {
@@ -33,20 +34,23 @@ struct RunningProfileControlRegistry::ProfileEntry {
   const raw_ptr<Profile> profile;
   ProfilePreferenceControlBackend backend;
   PreferenceControlTransport transport;
-  PreferenceControlTransportStartStatus transport_start_status =
-      PreferenceControlTransportStartStatus::kThreadStartFailed;
+  bool ready = false;
   std::vector<raw_ptr<BrowserWindowInterface>> windows;
   base::RepeatingCallbackList<void(const EffectivePreferenceValue&)>
       value_changed_callbacks;
 };
 
 RunningProfileControlRegistry::Registration::Registration(
-    RunningProfileControlRegistry* registry,
+    base::WeakPtr<RunningProfileControlRegistry> registry,
     Profile* profile,
     BrowserWindowInterface* browser_window,
+    std::string instance_identifier,
     base::RepeatingCallback<void(const EffectivePreferenceValue&)>
         value_changed)
-    : registry_(registry), profile_(profile), browser_window_(browser_window) {
+    : registry_(registry),
+      profile_(profile),
+      browser_window_(browser_window),
+      instance_identifier_(std::move(instance_identifier)) {
   if (value_changed) {
     value_changed_subscription_ =
         registry_->FindEntry(profile_)->value_changed_callbacks.Add(
@@ -65,7 +69,11 @@ ProfilePreferenceControlBackend*
 RunningProfileControlRegistry::Registration::backend() const {
   RunningProfileControlRegistry::ProfileEntry* entry =
       registry_ && profile_ ? registry_->FindEntry(profile_) : nullptr;
-  return entry ? &entry->backend : nullptr;
+  if (!entry ||
+      entry->backend.profile_instance_identifier() != instance_identifier_) {
+    return nullptr;
+  }
+  return &entry->backend;
 }
 
 void RunningProfileControlRegistry::Registration::OnBrowserDidClose(
@@ -76,21 +84,26 @@ void RunningProfileControlRegistry::Registration::OnBrowserDidClose(
 }
 
 void RunningProfileControlRegistry::Registration::Reset() {
-  if (!registry_ || !profile_ || !browser_window_) {
-    return;
-  }
   browser_did_close_subscription_ = {};
   value_changed_subscription_ = {};
-  RunningProfileControlRegistry* registry = registry_;
+  base::WeakPtr<RunningProfileControlRegistry> registry = registry_;
   Profile* profile = profile_;
   BrowserWindowInterface* browser_window = browser_window_;
   registry_ = nullptr;
   profile_ = nullptr;
   browser_window_ = nullptr;
-  registry->UnregisterWindow(profile, browser_window);
+  if (registry && profile && browser_window) {
+    registry->UnregisterWindow(profile, browser_window, instance_identifier_);
+  }
+  instance_identifier_.clear();
 }
 
 RunningProfileControlRegistry::RunningProfileControlRegistry() = default;
+void RunningProfileControlRegistry::SetTransportTestingHooksForTesting(
+    PreferenceControlTransport::TestingHooks hooks) {
+  CHECK(entries_.empty());
+  transport_testing_hooks_ = std::move(hooks);
+}
 RunningProfileControlRegistry::~RunningProfileControlRegistry() = default;
 
 std::unique_ptr<RunningProfileControlRegistry::Registration>
@@ -110,20 +123,38 @@ RunningProfileControlRegistry::RegisterWindow(
 
   ProfileEntry* entry = FindEntry(profile);
   if (!entry) {
-    entries_.push_back(std::make_unique<ProfileEntry>(profile));
+    entries_.push_back(
+        std::make_unique<ProfileEntry>(profile, transport_testing_hooks_));
     entry = entries_.back().get();
-    if (entry->transport_start_status !=
-        PreferenceControlTransportStartStatus::kSuccess) {
-      entries_.pop_back();
-      return nullptr;
-    }
+    ProfileEntry* started_entry = entry;
+    entry->transport.StartAsync(base::BindOnce(
+        &RunningProfileControlRegistry::OnTransportReady,
+        weak_factory_.GetWeakPtr(), profile,
+        std::string(started_entry->backend.profile_instance_identifier()),
+        true));
   }
   if (std::ranges::contains(entry->windows, browser_window)) {
     return nullptr;
   }
+  if (entry->transport.state() == PreferenceControlTransport::State::kStopped) {
+    entry->ready = false;
+    entry->transport.StartAsync(base::BindOnce(
+        &RunningProfileControlRegistry::OnTransportReady,
+        weak_factory_.GetWeakPtr(), profile,
+        std::string(entry->backend.profile_instance_identifier()), false));
+  } else if (entry->transport.state() ==
+             PreferenceControlTransport::State::kStopping) {
+    entry->ready = false;
+    entry->transport.StartWhenStoppedAsync(base::BindOnce(
+        &RunningProfileControlRegistry::OnTransportReady,
+        weak_factory_.GetWeakPtr(), profile,
+        std::string(entry->backend.profile_instance_identifier()), false));
+  }
   entry->windows.push_back(browser_window);
   return std::unique_ptr<Registration>(new Registration(
-      this, profile, browser_window, std::move(value_changed)));
+      weak_factory_.GetWeakPtr(), profile, browser_window,
+      std::string(entry->backend.profile_instance_identifier()),
+      std::move(value_changed)));
 }
 
 std::vector<RunningProfileControlDescriptor>
@@ -131,6 +162,10 @@ RunningProfileControlRegistry::DiscoverProfiles() const {
   std::vector<RunningProfileControlDescriptor> profiles;
   profiles.reserve(entries_.size());
   for (const auto& entry : entries_) {
+    if (!entry->ready ||
+        entry->transport.state() != PreferenceControlTransport::State::kReady) {
+      continue;
+    }
     profiles.push_back(
         {.profile_identifier = std::string(entry->backend.profile_identifier()),
          .profile_instance_identifier =
@@ -186,24 +221,53 @@ RunningProfileControlRegistry::ProfileEntry*
 RunningProfileControlRegistry::FindEntry(
     std::string_view profile_identifier) const {
   auto entry = std::ranges::find_if(entries_, [&](const auto& candidate) {
-    return candidate->backend.profile_identifier() == profile_identifier;
+    return candidate->ready &&
+           candidate->transport.state() ==
+               PreferenceControlTransport::State::kReady &&
+           candidate->backend.profile_identifier() == profile_identifier;
   });
   return entry == entries_.end() ? nullptr : entry->get();
 }
 
 void RunningProfileControlRegistry::UnregisterWindow(
     Profile* profile,
-    BrowserWindowInterface* browser_window) {
+    BrowserWindowInterface* browser_window,
+    std::string_view instance_identifier) {
   ProfileEntry* entry = FindEntry(profile);
-  if (!entry) {
+  if (!entry ||
+      entry->backend.profile_instance_identifier() != instance_identifier) {
     return;
   }
   std::erase(entry->windows, browser_window);
   if (entry->windows.empty()) {
+    entry->transport.Stop();
     std::erase_if(entries_, [entry](const auto& candidate) {
       return candidate.get() == entry;
     });
   }
+}
+
+void RunningProfileControlRegistry::OnTransportReady(
+    Profile* profile,
+    std::string instance_identifier,
+    bool initial_start,
+    PreferenceControlTransportStartStatus status) {
+  ProfileEntry* entry = FindEntry(profile);
+  if (!entry ||
+      entry->backend.profile_instance_identifier() != instance_identifier) {
+    return;
+  }
+  if (status != PreferenceControlTransportStartStatus::kSuccess) {
+    if (!initial_start) {
+      entry->ready = false;
+      return;
+    }
+    std::erase_if(entries_, [entry](const auto& candidate) {
+      return candidate.get() == entry;
+    });
+    return;
+  }
+  entry->ready = true;
 }
 
 RunningProfileControlRegistry& GetRunningProfileControlRegistry() {

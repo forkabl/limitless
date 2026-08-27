@@ -21,6 +21,7 @@
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_reader.h"
 #include "base/process/process_handle.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/thread_pool.h"
 #include "base/test/scoped_run_loop_timeout.h"
@@ -519,6 +520,24 @@ struct Evidence {
   bool descriptor_removed = false;
   bool residue_free = true;
 };
+
+struct FallbackCollisionEvidence {
+  PreferenceControlTransportWorker::PrepareResult first_result;
+  PreferenceControlTransportWorker::PrepareResult second_result;
+  bool first_socket_survived = false;
+  bool first_token_survived = false;
+  bool first_descriptor_survived = false;
+  bool second_token_absent = false;
+  bool second_descriptor_absent = false;
+  bool first_socket_removed = false;
+  bool first_token_removed = false;
+  bool first_descriptor_removed = false;
+  bool parent_before_ok = false;
+  bool parent_after_ok = false;
+  struct stat parent_before = {};
+  struct stat parent_after = {};
+};
+
 PreferenceControlTransportWorker::Inputs Inputs(const base::FilePath& p) {
   return {p.AppendASCII("r"),
           p.AppendASCII("r/d"),
@@ -528,6 +547,32 @@ PreferenceControlTransportWorker::Inputs Inputs(const base::FilePath& p) {
           "i",
           "cap"};
 }
+
+void ConfigureLongSocketFallback(
+    PreferenceControlTransportWorker::Inputs* inputs,
+    const base::FilePath& unique_root) {
+  std::string unique_suffix = unique_root.BaseName().value();
+  if (unique_suffix.size() > 20) {
+    unique_suffix.erase(0, unique_suffix.size() - 20);
+  }
+  inputs->profile_id = "fallback-test";
+  inputs->instance_id =
+      std::to_string(base::GetCurrentProcId()) + "-" + std::move(unique_suffix);
+  inputs->socket_path =
+      inputs->runtime_directory.AppendASCII(std::string(200, 'x'));
+}
+
+base::FilePath FallbackSocketParent() {
+  return base::FilePath(FILE_PATH_LITERAL("/tmp"))
+      .AppendASCII("limitless-" + std::to_string(geteuid()));
+}
+
+base::FilePath ExpectedFallbackSocket(
+    const PreferenceControlTransportWorker::Inputs& inputs) {
+  return FallbackSocketParent().AppendASCII(
+      "s-" + inputs.profile_id.substr(0, 12) + "-" + inputs.instance_id);
+}
+
 Evidence Journey(PreferenceControlTransportWorker::Inputs in,
                  scoped_refptr<TransportCancellationState> c) {
   Evidence e;
@@ -556,8 +601,9 @@ Evidence Journey(PreferenceControlTransportWorker::Inputs in,
   for (base::FilePath path = leftovers.Next(); !path.empty();
        path = leftovers.Next()) {
     const std::string name = path.BaseName().value();
-    if (name.find(".limitless-publish-") != std::string::npos ||
-        name.find(".limitless-quarantine-") != std::string::npos) {
+    const std::string pid = base::NumberToString(base::GetCurrentProcId());
+    if (name.find(".limitless-publish-" + pid + "-") != std::string::npos ||
+        name.find(".limitless-quarantine-" + pid + "-") != std::string::npos) {
       e.residue_free = false;
     }
   }
@@ -571,6 +617,49 @@ Evidence RunWorker(PreferenceControlTransportWorker::Inputs in,
       base::BindOnce(&Journey, std::move(in), c), f.GetCallback());
   return f.Take();
 }
+
+FallbackCollisionEvidence RunFallbackCollision(
+    PreferenceControlTransportWorker::Inputs first_inputs,
+    PreferenceControlTransportWorker::Inputs second_inputs) {
+  FallbackCollisionEvidence evidence;
+  PreferenceControlTransportWorker first(
+      first_inputs, base::MakeRefCounted<TransportCancellationState>());
+  evidence.first_result = first.Prepare();
+  if (!evidence.first_result.succeeded) {
+    return evidence;
+  }
+  evidence.parent_before_ok =
+      stat(evidence.first_result.socket_path.DirName().value().c_str(),
+           &evidence.parent_before) == 0;
+  {
+    PreferenceControlTransportWorker second(
+        second_inputs, base::MakeRefCounted<TransportCancellationState>());
+    evidence.second_result = second.Prepare();
+    second.Cleanup();
+  }
+  evidence.first_socket_survived =
+      base::PathExists(evidence.first_result.socket_path);
+  evidence.first_token_survived =
+      base::PathExists(evidence.first_result.credential_path);
+  evidence.first_descriptor_survived =
+      base::PathExists(evidence.first_result.descriptor_path);
+  evidence.second_token_absent =
+      !base::PathExists(second_inputs.credential_path);
+  evidence.second_descriptor_absent =
+      !base::PathExists(second_inputs.descriptor_path);
+  first.Cleanup();
+  evidence.first_socket_removed =
+      !base::PathExists(evidence.first_result.socket_path);
+  evidence.first_token_removed =
+      !base::PathExists(evidence.first_result.credential_path);
+  evidence.first_descriptor_removed =
+      !base::PathExists(evidence.first_result.descriptor_path);
+  evidence.parent_after_ok =
+      stat(evidence.first_result.socket_path.DirName().value().c_str(),
+           &evidence.parent_after) == 0;
+  return evidence;
+}
+
 TEST(LimitlessPreferenceControlTransportWorkerTest,
      SuccessfulPreparePublishesExactPrivateArtifactsAndCleanup) {
   base::test::TaskEnvironment env;
@@ -802,20 +891,101 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
 }
 
 TEST(LimitlessPreferenceControlTransportWorkerTest,
-     OverlongSocketNameReturnsSocket) {
+     OverlongSocketUsesPrivateShortPathAndCleansOnlyOwnedArtifacts) {
   base::test::TaskEnvironment env;
   base::ScopedTempDir t;
   ASSERT_TRUE(t.CreateUniqueTempDir());
   auto in = Inputs(t.GetPath());
-  in.socket_path = in.runtime_directory.AppendASCII(std::string(200, 'x'));
+  ConfigureLongSocketFallback(&in, t.GetPath());
+  const base::FilePath expected_socket = ExpectedFallbackSocket(in);
+  const base::FilePath expected_descriptor = in.descriptor_path;
+  ASSERT_FALSE(base::PathExists(expected_socket));
   Evidence e =
       RunWorker(in, base::MakeRefCounted<TransportCancellationState>());
+  ASSERT_TRUE(e.result.succeeded);
   EXPECT_EQ(e.result.status,
-            PreferenceControlTransportWorker::WorkerPrepareStatus::kSocket);
-  EXPECT_FALSE(e.socket);
-  EXPECT_FALSE(e.token);
-  EXPECT_FALSE(e.descriptor);
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kSuccess);
+  EXPECT_EQ(e.result.socket_path, expected_socket);
+  EXPECT_EQ(e.result.descriptor_path, expected_descriptor);
+  EXPECT_LT(e.result.socket_path.value().size(), sizeof(sockaddr_un::sun_path));
+  EXPECT_TRUE(e.socket);
+  EXPECT_TRUE(e.token);
+  EXPECT_TRUE(e.descriptor);
+  EXPECT_EQ(e.token_contents, "cap");
+  auto descriptor = base::JSONReader::Read(e.descriptor_contents, 0);
+  ASSERT_TRUE(descriptor.has_value());
+  const base::DictValue* descriptor_dict = descriptor->GetIfDict();
+  ASSERT_TRUE(descriptor_dict);
+  ASSERT_TRUE(descriptor_dict->FindString("socket_path"));
+  EXPECT_EQ(*descriptor_dict->FindString("socket_path"),
+            expected_socket.value());
+  ASSERT_TRUE(e.runtime_stat_ok);
+  EXPECT_TRUE(S_ISDIR(e.runtime_stat.st_mode));
+  EXPECT_EQ(e.runtime_stat.st_uid, geteuid());
+  EXPECT_EQ(e.runtime_stat.st_mode & 0777, 0700);
+  ASSERT_TRUE(e.socket_stat_ok);
+  EXPECT_TRUE(S_ISSOCK(e.socket_stat.st_mode));
+  EXPECT_EQ(e.socket_stat.st_uid, geteuid());
+  EXPECT_TRUE(e.socket_removed);
+  EXPECT_TRUE(e.token_removed);
+  EXPECT_TRUE(e.descriptor_removed);
   EXPECT_TRUE(e.residue_free);
+
+  struct stat retained_parent = {};
+  ASSERT_EQ(stat(FallbackSocketParent().value().c_str(), &retained_parent), 0);
+  EXPECT_TRUE(S_ISDIR(retained_parent.st_mode));
+  EXPECT_EQ(retained_parent.st_uid, geteuid());
+  EXPECT_EQ(retained_parent.st_mode & 0777, 0700);
+  EXPECT_EQ(retained_parent.st_dev, e.runtime_stat.st_dev);
+  EXPECT_EQ(retained_parent.st_ino, e.runtime_stat.st_ino);
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     FallbackCollisionPreservesFirstWorkerAndSharedParent) {
+  base::test::TaskEnvironment env;
+  base::ScopedTempDir first_root;
+  base::ScopedTempDir second_root;
+  ASSERT_TRUE(first_root.CreateUniqueTempDir());
+  ASSERT_TRUE(second_root.CreateUniqueTempDir());
+  auto first_inputs = Inputs(first_root.GetPath());
+  auto second_inputs = Inputs(second_root.GetPath());
+  ConfigureLongSocketFallback(&first_inputs, first_root.GetPath());
+  ConfigureLongSocketFallback(&second_inputs, second_root.GetPath());
+  second_inputs.profile_id = first_inputs.profile_id;
+  second_inputs.instance_id = first_inputs.instance_id;
+  const base::FilePath expected_socket = ExpectedFallbackSocket(first_inputs);
+  ASSERT_EQ(ExpectedFallbackSocket(second_inputs), expected_socket);
+  ASSERT_FALSE(base::PathExists(expected_socket));
+
+  base::test::TestFuture<FallbackCollisionEvidence> result;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
+      base::BindOnce(&RunFallbackCollision, std::move(first_inputs),
+                     std::move(second_inputs)),
+      result.GetCallback());
+  FallbackCollisionEvidence evidence = result.Take();
+
+  ASSERT_TRUE(evidence.first_result.succeeded);
+  EXPECT_EQ(evidence.first_result.socket_path, expected_socket);
+  EXPECT_FALSE(evidence.second_result.succeeded);
+  EXPECT_EQ(evidence.second_result.status,
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kCollision);
+  EXPECT_EQ(evidence.second_result.socket_path, expected_socket);
+  EXPECT_TRUE(evidence.first_socket_survived);
+  EXPECT_TRUE(evidence.first_token_survived);
+  EXPECT_TRUE(evidence.first_descriptor_survived);
+  EXPECT_TRUE(evidence.second_token_absent);
+  EXPECT_TRUE(evidence.second_descriptor_absent);
+  EXPECT_TRUE(evidence.first_socket_removed);
+  EXPECT_TRUE(evidence.first_token_removed);
+  EXPECT_TRUE(evidence.first_descriptor_removed);
+  ASSERT_TRUE(evidence.parent_before_ok);
+  ASSERT_TRUE(evidence.parent_after_ok);
+  EXPECT_TRUE(S_ISDIR(evidence.parent_after.st_mode));
+  EXPECT_EQ(evidence.parent_after.st_uid, geteuid());
+  EXPECT_EQ(evidence.parent_after.st_mode & 0777, 0700);
+  EXPECT_EQ(evidence.parent_after.st_dev, evidence.parent_before.st_dev);
+  EXPECT_EQ(evidence.parent_after.st_ino, evidence.parent_before.st_ino);
 }
 
 TEST(LimitlessPreferenceControlTransportWorkerTest,
