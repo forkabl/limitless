@@ -71,6 +71,9 @@ ProductCommandWindowRegistry::Register(
       browser->IsDeleteScheduled()) {
     return nullptr;
   }
+  if (browser->GetProfile()->IsOffTheRecord()) {
+    return nullptr;
+  }
   for (const Entry& entry : entries_) {
     if (entry.browser == browser) {
       return nullptr;
@@ -86,9 +89,21 @@ std::vector<ProductCommandWindowDescriptor>
 ProductCommandWindowRegistry::Discover() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   std::vector<ProductCommandWindowDescriptor> result;
-  for (const Entry& entry : entries_) {
-    if (auto state = entry.binding ? entry.binding->GetState() : std::nullopt) {
-      result.push_back({{state->window_id, entry.window_instance_id}, *state});
+  std::vector<std::pair<raw_ptr<BrowserWindowInterface>, std::string>> tokens;
+  for (const Entry& entry : entries_)
+    tokens.emplace_back(entry.browser, entry.window_instance_id);
+  for (const auto& [browser, instance] : tokens) {
+    auto it = std::ranges::find_if(entries_, [browser, &instance](const Entry& e) {
+      return e.browser == browser && e.window_instance_id == instance;
+    });
+    if (it != entries_.end() && it->binding &&
+        entries_.end() != std::ranges::find_if(entries_, [browser, &instance](const Entry& e) {
+          return e.browser == browser && e.window_instance_id == instance;
+        })) {
+      auto state = it->binding->GetState();
+      if (!state)
+        continue;
+      result.push_back({{state->window_id, instance}, *state});
     }
   }
   return result;
