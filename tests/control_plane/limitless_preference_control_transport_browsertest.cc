@@ -20,8 +20,9 @@
 #include "base/task/thread_pool.h"
 #include "base/test/run_until.h"
 #include "base/test/test_future.h"
-#include "base/threading/scoped_blocking_call.h"
 #include "base/threading/platform_thread.h"
+#include "base/threading/scoped_blocking_call.h"
+#include "base/threading/thread_restrictions.h"
 #include "base/time/time.h"
 #include "base/timer/elapsed_timer.h"
 #include "chrome/browser/ui/browser.h"
@@ -87,9 +88,12 @@ class LimitlessPreferenceControlTransportHostileBrowserTest
 
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        DripFeedCannotExtendAbsoluteFrameDeadline) {
-  base::ScopedTempDir user_data_directory;
   base::ScopedAllowBlockingForTesting allow_blocking;
-  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  base::ScopedTempDir user_data_directory;
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  }
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
   ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
@@ -108,9 +112,12 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        StopCancelsAcceptedPartialFrameAndCleansEndpoint) {
-  base::ScopedTempDir user_data_directory;
   base::ScopedAllowBlockingForTesting allow_blocking;
-  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  base::ScopedTempDir user_data_directory;
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  }
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
   ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
@@ -138,9 +145,12 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
                        StopCancelsIdleAcceptWithoutWaitingForIoDeadline) {
-  base::ScopedTempDir user_data_directory;
   base::ScopedAllowBlockingForTesting allow_blocking;
-  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  base::ScopedTempDir user_data_directory;
+  {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  }
   ProfilePreferenceControlBackend backend(browser()->GetProfile());
   PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
   ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
