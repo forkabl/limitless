@@ -10,9 +10,11 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 
+#include "base/check.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
 
@@ -247,27 +249,90 @@ PublishResult WritePrivateFileNoReplaceAt(
   return PublishResult::kSuccess;
 }
 
+void ShutdownNoIntr(int fd) {
+  while (shutdown(fd, SHUT_RDWR) != 0 && errno == EINTR) {
+  }
+}
+
+void WakeCancellationPipeNoIntr(int fd) {
+  const char byte = 0;
+  for (;;) {
+    const ssize_t written = write(fd, &byte, 1);
+    if (written == 1 ||
+        (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+      return;
+    }
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
+    return;
+  }
+}
+
 }  // namespace
 
 namespace limitless {
 
-PendingRequest::PendingRequest() = default;
+PendingRequest::PendingRequest(base::TimeTicks deadline)
+    : deadline_(deadline) {}
+
 PendingRequest::~PendingRequest() = default;
+
+bool PendingRequest::TryBeginHandling() {
+  base::AutoLock lock(lock_);
+  if (state_ != State::kWaiting) {
+    return false;
+  }
+  if (base::TimeTicks::Now() >= deadline_) {
+    state_ = State::kCancelled;
+    cv_.Broadcast();
+    return false;
+  }
+  state_ = State::kClaimed;
+  return true;
+}
+
 bool PendingRequest::Complete(std::string response) {
   base::AutoLock lock(lock_);
-  if (cancelled_ || response_) return false;
-  response_ = std::move(response); cv_.Broadcast(); return true;
+  if (state_ != State::kClaimed) {
+    return false;
+  }
+  if (base::TimeTicks::Now() >= deadline_) {
+    state_ = State::kCancelled;
+    cv_.Broadcast();
+    return false;
+  }
+  response_ = std::move(response);
+  state_ = State::kCompleted;
+  cv_.Broadcast();
+  return true;
 }
-void PendingRequest::Cancel() { base::AutoLock lock(lock_); cancelled_ = true; cv_.Broadcast(); }
-bool PendingRequest::WaitUntil(base::TimeTicks deadline, std::string* response) {
+
+void PendingRequest::Cancel() {
   base::AutoLock lock(lock_);
-  while (!response_ && !cancelled_) {
-    base::TimeDelta remaining = deadline - base::TimeTicks::Now();
-    if (remaining <= base::TimeDelta()) break;
+  if (state_ == State::kCompleted || state_ == State::kCancelled) {
+    return;
+  }
+  state_ = State::kCancelled;
+  cv_.Broadcast();
+}
+
+bool PendingRequest::Wait(std::string* response) {
+  base::AutoLock lock(lock_);
+  while (state_ == State::kWaiting || state_ == State::kClaimed) {
+    const base::TimeDelta remaining = deadline_ - base::TimeTicks::Now();
+    if (!remaining.is_positive()) {
+      state_ = State::kCancelled;
+      cv_.Broadcast();
+      return false;
+    }
     cv_.TimedWait(remaining);
   }
-  if (!response_) return false;
-  *response = *response_; return true;
+  if (state_ != State::kCompleted) {
+    return false;
+  }
+  *response = *response_;
+  return true;
 }
 
 TransportCancellationState::TransportCancellationState() = default;
@@ -275,68 +340,89 @@ TransportCancellationState::~TransportCancellationState() = default;
 
 void TransportCancellationState::Cancel() {
   cancelled.store(true, std::memory_order_release);
-  base::AutoLock guard(lock);
-  if (active_fd >= 0) {
-    shutdown(active_fd, SHUT_RDWR);
-  }
-  if (active_request) {
-    active_request->Cancel();
-  }
-  if (writer_fd.is_valid()) {
-    const char byte = 0;
-    for (;;) {
-      ssize_t written = write(writer_fd.get(), &byte, 1);
-      if (written == 1 ||
-          (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-        break;
-      }
-      if (written < 0 && errno == EINTR) {
-        continue;
-      }
-      writer_fd.reset();
-      break;
+  scoped_refptr<PendingRequest> request;
+  {
+    base::AutoLock guard(lock_);
+    if (active_fd_ >= 0) {
+      ShutdownNoIntr(active_fd_);
     }
+    request = active_request_;
+    if (writer_fd_.is_valid()) {
+      WakeCancellationPipeNoIntr(writer_fd_.get());
+    }
+  }
+  if (request) {
+    request->Cancel();
   }
 }
 
 void TransportCancellationState::InstallWriter(int fd) {
-  base::AutoLock guard(lock);
-  writer_fd.reset(fd);
+  base::AutoLock guard(lock_);
+  writer_fd_.reset(fd);
   if (cancelled.load(std::memory_order_acquire)) {
-    const char byte = 0;
-    write(writer_fd.get(), &byte, 1);
+    WakeCancellationPipeNoIntr(writer_fd_.get());
   }
 }
 
 void TransportCancellationState::ClearWriter() {
-  base::AutoLock guard(lock);
-  writer_fd.reset();
+  base::AutoLock guard(lock_);
+  writer_fd_.reset();
 }
 
-void TransportCancellationState::InstallActive(
-    int fd,
-    scoped_refptr<PendingRequest> request) {
-  base::AutoLock guard(lock);
-  active_fd = fd;
-  active_request = std::move(request);
-  if (cancelled.load(std::memory_order_acquire)) {
-    if (active_fd >= 0) {
-      shutdown(active_fd, SHUT_RDWR);
+uint64_t TransportCancellationState::InstallAcceptedFd(int fd) {
+  scoped_refptr<PendingRequest> superseded_request;
+  uint64_t token;
+  {
+    base::AutoLock guard(lock_);
+    if (active_fd_ >= 0) {
+      ShutdownNoIntr(active_fd_);
     }
-    if (active_request) {
-      active_request->Cancel();
+    superseded_request = std::move(active_request_);
+    CHECK_NE(next_registration_token_, std::numeric_limits<uint64_t>::max());
+    token = ++next_registration_token_;
+    active_registration_token_ = token;
+    active_fd_ = fd;
+    if (cancelled.load(std::memory_order_acquire) && active_fd_ >= 0) {
+      ShutdownNoIntr(active_fd_);
     }
   }
+  if (superseded_request) {
+    superseded_request->Cancel();
+  }
+  return token;
 }
 
-void TransportCancellationState::ClearActive(
-    int fd,
+bool TransportCancellationState::InstallPendingRequest(
+    uint64_t token,
     scoped_refptr<PendingRequest> request) {
-  base::AutoLock guard(lock);
-  if (active_fd == fd && active_request == request) {
-    active_fd = -1;
-    active_request.reset();
+  bool installed = false;
+  {
+    base::AutoLock guard(lock_);
+    if (!cancelled.load(std::memory_order_acquire) && request && token != 0 &&
+        token == active_registration_token_ && active_fd_ >= 0 &&
+        !active_request_) {
+      active_request_ = request;
+      installed = true;
+    }
   }
+  if (!installed && request) {
+    request->Cancel();
+  }
+  return installed;
+}
+
+void TransportCancellationState::ClearActive(uint64_t token) {
+  scoped_refptr<PendingRequest> request;
+  {
+    base::AutoLock guard(lock_);
+    if (token == 0 || token != active_registration_token_) {
+      return;
+    }
+    active_registration_token_ = 0;
+    active_fd_ = -1;
+    request = std::move(active_request_);
+  }
+  request.reset();
 }
 
 PreferenceControlTransportWorker::PreferenceControlTransportWorker(

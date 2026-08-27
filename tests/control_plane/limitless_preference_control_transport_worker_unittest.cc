@@ -436,5 +436,43 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
               std::string::npos);
   }
 }
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     PendingRequestCompletionAndCancellation) {
+  base::test::TaskEnvironment env;
+  auto request = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
+                                                      base::Seconds(2));
+  base::test::TestFuture<std::string> future;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock()},
+      base::BindOnce(
+          [](scoped_refptr<PendingRequest> pending) {
+            std::string response;
+            pending->Wait(&response);
+            return response;
+          },
+          request),
+      future.GetCallback());
+  EXPECT_TRUE(request->TryBeginHandling());
+  EXPECT_TRUE(request->Complete("ok"));
+  EXPECT_EQ(future.Take(), "ok");
+  EXPECT_FALSE(request->Complete("late"));
+  auto cancelled = base::MakeRefCounted<PendingRequest>(base::TimeTicks::Now() +
+                                                        base::Seconds(2));
+  base::test::TestFuture<bool> cancelled_future;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock()},
+      base::BindOnce(
+          [](scoped_refptr<PendingRequest> p) {
+            std::string s;
+            return p->Wait(&s);
+          },
+          cancelled),
+      cancelled_future.GetCallback());
+  cancelled->Cancel();
+  EXPECT_FALSE(cancelled_future.Take());
+  EXPECT_FALSE(cancelled->TryBeginHandling());
+  EXPECT_FALSE(cancelled->Complete("late"));
+}
 }  // namespace
 }  // namespace limitless

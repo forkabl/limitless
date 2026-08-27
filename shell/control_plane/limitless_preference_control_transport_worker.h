@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -28,18 +29,28 @@ struct ArtifactIdentity {
 
 class PendingRequest : public base::RefCountedThreadSafe<PendingRequest> {
  public:
-  PendingRequest();
+  explicit PendingRequest(base::TimeTicks deadline);
+  bool TryBeginHandling();
   bool Complete(std::string response);
   void Cancel();
-  bool WaitUntil(base::TimeTicks deadline, std::string* response);
+  bool Wait(std::string* response);
 
  private:
+  enum class State {
+    kWaiting,
+    kClaimed,
+    kCompleted,
+    kCancelled,
+  };
+
   friend class base::RefCountedThreadSafe<PendingRequest>;
   ~PendingRequest();
+
   base::Lock lock_;
   base::ConditionVariable cv_{&lock_};
+  const base::TimeTicks deadline_;
+  State state_ = State::kWaiting;
   std::optional<std::string> response_;
-  bool cancelled_ = false;
 };
 
 struct TransportCancellationState
@@ -48,17 +59,22 @@ struct TransportCancellationState
   void Cancel();
   void InstallWriter(int fd);
   void ClearWriter();
-  void InstallActive(int fd, scoped_refptr<PendingRequest> request);
-  void ClearActive(int fd, scoped_refptr<PendingRequest> request);
+  uint64_t InstallAcceptedFd(int fd);
+  bool InstallPendingRequest(uint64_t token,
+                             scoped_refptr<PendingRequest> request);
+  void ClearActive(uint64_t token);
   std::atomic<bool> cancelled{false};
-  base::Lock lock;
-  base::ScopedFD writer_fd;
-  int active_fd = -1;
-  scoped_refptr<PendingRequest> active_request;
 
  private:
   friend class base::RefCountedThreadSafe<TransportCancellationState>;
   ~TransportCancellationState();
+
+  base::Lock lock_;
+  base::ScopedFD writer_fd_;
+  uint64_t next_registration_token_ = 0;
+  uint64_t active_registration_token_ = 0;
+  int active_fd_ = -1;
+  scoped_refptr<PendingRequest> active_request_;
 };
 
 class PreferenceControlTransportWorker {
