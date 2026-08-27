@@ -112,6 +112,7 @@
 #include "net/test/embedded_test_server/http_response.h"
 #include "shell/agents/herdr_agent_provider.h"
 #include "shell/commands/limitless_command_registry.h"
+#include "shell/commands/limitless_command_window_binding.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/accelerators/test_accelerator_target.h"
@@ -1272,6 +1273,31 @@ IN_PROC_BROWSER_TEST_F(
   ASSERT_TRUE(WaitForCondition(
       [&]() { return tab_strip->count() == 1 && !two_handle.Get(); }));
   EXPECT_EQ(one, tab_strip->GetActiveTab());
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,
+                       ProductCommandWindowBindingProjectsLiveState) {
+  views::View* rail = GetSwiftUITabRail(browser());
+  ASSERT_TRUE(rail);
+  auto state =
+      limitless::GetSwiftUIProductCommandWindowStateForTesting(browser());
+  ASSERT_TRUE(state);
+  const auto snapshot = limitless::GetSwiftUITabRailSnapshotForTesting(rail);
+  ASSERT_TRUE(snapshot);
+  EXPECT_EQ(snapshot->window_identifier, state->window_id);
+  EXPECT_EQ(snapshot->active_workspace_identifier, state->active_workspace_id);
+  EXPECT_EQ(snapshot->tab_product_identifiers, state->visible_tab_ids);
+  ASSERT_TRUE(snapshot->active_tab_identifier);
+  ASSERT_TRUE(state->active_tab_id);
+  const auto active_it = std::find(snapshot->tab_identifiers.begin(),
+                                   snapshot->tab_identifiers.end(),
+                                   *snapshot->active_tab_identifier);
+  ASSERT_NE(snapshot->tab_identifiers.end(), active_it);
+  EXPECT_EQ(
+      snapshot->tab_product_identifiers[active_it -
+                                        snapshot->tab_identifiers.begin()],
+      *state->active_tab_id);
+  EXPECT_EQ(browser()->IsActive(), state->is_active);
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessSwiftUIBrowserTest,

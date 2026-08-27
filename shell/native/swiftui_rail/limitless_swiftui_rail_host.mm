@@ -878,7 +878,38 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
       if (split_snapshot.window_identifier != workspace.window_identifier) {
         return std::nullopt;
       }
+      if (split_snapshot.availability_status !=
+              SplitPaneOperationStatus::kSuccess &&
+          split_snapshot.availability_status !=
+              SplitPaneOperationStatus::kTabListNotEditable) {
+        return std::nullopt;
+      }
+      std::set<std::string> split_ids;
+      std::set<std::string> split_members;
+      size_t active_split_count = 0;
       for (const SplitPaneProjection& split : split_snapshot.splits) {
+        if (!canonical(split.split_instance_identifier) ||
+            !split_ids.insert(split.split_instance_identifier).second ||
+            !canonical(split.first_tab_identifier) ||
+            !canonical(split.second_tab_identifier) ||
+            split.first_tab_identifier == split.second_tab_identifier ||
+            !split_members.insert(split.first_tab_identifier).second ||
+            !split_members.insert(split.second_tab_identifier).second ||
+            !tab_ids.contains(split.first_tab_identifier) ||
+            !tab_ids.contains(split.second_tab_identifier) ||
+            !std::isfinite(split.ratio) || split.ratio < 0.25 ||
+            split.ratio > 0.75 ||
+            (split.active_tab_identifier &&
+             *split.active_tab_identifier != split.first_tab_identifier &&
+             *split.active_tab_identifier != split.second_tab_identifier)) {
+          return std::nullopt;
+        }
+        if (split.active_tab_identifier) {
+          if (++active_split_count > 1 ||
+              *split.active_tab_identifier != *state.active_tab_id) {
+            return std::nullopt;
+          }
+        }
         state.splits.push_back(
             {.split_instance_id = split.split_instance_identifier,
              .first_tab_id = split.first_tab_identifier,
