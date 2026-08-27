@@ -21,11 +21,10 @@
 #include "base/test/run_until.h"
 #include "base/test/test_future.h"
 #include "base/threading/platform_thread.h"
-#include "base/timer/elapsed_timer.h"
 #include "base/time/time.h"
+#include "base/timer/elapsed_timer.h"
 #include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
-#include "content/public/test/browser_test.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace limitless {
@@ -65,7 +64,7 @@ DripFeedResult DripFeedFrame(const base::FilePath& socket_path) {
   constexpr uint32_t kPayloadSize = 20;
   const uint32_t network_size = htonl(kPayloadSize);
   if (send(connection.get(), &network_size, sizeof(network_size),
-           MSG_NOSIGNAL) != sizeof(network_size)) {
+           MSG_NOSIGNAL) != static_cast<ssize_t>(sizeof(network_size))) {
     return {};
   }
 
@@ -73,7 +72,7 @@ DripFeedResult DripFeedFrame(const base::FilePath& socket_path) {
   for (size_t index = 0; index < kPayloadSize; ++index) {
     const char byte = 'x';
     if (send(connection.get(), &byte, sizeof(byte), MSG_NOSIGNAL) !=
-        sizeof(byte)) {
+        static_cast<ssize_t>(sizeof(byte))) {
       return {.server_closed = true, .elapsed = elapsed.Elapsed()};
     }
     base::PlatformThread::Sleep(base::Milliseconds(300));
@@ -118,8 +117,9 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   base::ScopedFD connection = ConnectToSocket(socket_path);
   ASSERT_TRUE(connection.is_valid());
   const char partial_header = 0;
-  ASSERT_EQ(sizeof(partial_header), send(connection.get(), &partial_header,
-                                         sizeof(partial_header), MSG_NOSIGNAL));
+  ASSERT_EQ(static_cast<ssize_t>(sizeof(partial_header)),
+            send(connection.get(), &partial_header, sizeof(partial_header),
+                 MSG_NOSIGNAL));
   ASSERT_TRUE(base::test::RunUntil([&transport] {
     return transport.has_accepted_connection_for_testing();
   }));
@@ -130,6 +130,19 @@ IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
   EXPECT_FALSE(base::PathExists(descriptor_path));
   EXPECT_FALSE(base::PathExists(credential_path));
   EXPECT_FALSE(base::PathExists(socket_path));
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessPreferenceControlTransportHostileBrowserTest,
+                       StopCancelsIdleAcceptWithoutWaitingForIoDeadline) {
+  base::ScopedTempDir user_data_directory;
+  ASSERT_TRUE(user_data_directory.CreateUniqueTempDir());
+  ProfilePreferenceControlBackend backend(browser()->GetProfile());
+  PreferenceControlTransport transport(&backend, user_data_directory.GetPath());
+  ASSERT_EQ(PreferenceControlTransportStartStatus::kSuccess, transport.Start());
+
+  base::ElapsedTimer elapsed;
+  transport.Stop();
+  EXPECT_LT(elapsed.Elapsed(), base::Seconds(1));
 }
 
 }  // namespace
