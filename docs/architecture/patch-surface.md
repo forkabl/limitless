@@ -23,9 +23,11 @@ A distributable build is expected to need five foundation files so product targe
 | Split interactive-test wiring | 1 | Link the product-owned split transfer journey into Chromium's existing interactive test executable |
 | macOS child-modal reactivation | 1 | Reactivate a visible non-Aura child modal after its parent takes key focus |
 | macOS immersive tab-overlay safety | 1 | Skip separate tab-overlay entry, resize, and exit work when no initialized horizontal tab view exists |
+| Profile preference registration | 2 | Register the non-sync Limitless rail-density preference through Chromium's profile preference seam |
+| WebUI address edit-session ownership | 1 | Preserve active address drafts while committed tab projections update, with explicit cancel/navigation completion |
 | WebUI tab-handle scope fix | 1 | Same-browser membership check before guest creation |
 | WebUI guest-capability lifetime fix | 1 | Permanent revocation on tab detach, contents replacement, and browser close plus per-call authority checks |
-| Current combined unique files | 26 | `webui_browser/BUILD.gn`, `webui_browser_page_handler.cc`, and `browser_view.cc` each have intentional series overlap; `0010` intentionally overlaps the WebUI build file |
+| Current combined unique files | 29 | `webui_browser/BUILD.gn`, `webui_browser_page_handler.cc`, and `browser_view.cc` each have intentional series overlap; `0010` intentionally overlaps the WebUI build file |
 | Expected production foundation | 5 | Central external-root plumbing, product startup dependency, early feature defaults, and resource selection |
 | Expected WebUI production surface with handler fixes | 6 | Five foundation files plus the shared page-handler file while both fixes remain unupstreamed |
 | Current browser factory changes | 0 | Existing `WebUIBrowserWindow` selection is reused |
@@ -675,7 +677,7 @@ Most pinned `WebUIBrowserTest` cases enable `kAttachUnownedInnerWebContents`; on
 
 The disabled Linux compositor pixel test remains a future portability warning, not a macOS Gate 2 requirement.
 
-## Patch growth stop conditions
+## Additional narrow production patches
 
 ### 0013: profile preference registration
 
@@ -686,6 +688,17 @@ preference. It touches only `chrome/browser/prefs/BUILD.gn` and
 retention, and corruption tests cover the seam. Remove it when Chromium offers
 a supported product profile-preference registration hook; conflicts are
 expected if either registration symbol or source-set dependency moves.
+
+### 0014: WebUI address edit-session ownership
+
+The current Chromium series contains 14 patches and 29 combined unique
+upstream files. This patch touches one upstream TypeScript file and prevents
+committed tab projections from replacing an active address draft. Escape, blur,
+and accepted navigation explicitly end the edit session. Focused edit-session
+and WebUI regression journeys cover the seam; remove it when Chromium provides
+equivalent ownership.
+
+## Patch growth stop conditions
 
 Stop and reconsider the conditional hybrid if any of these occurs:
 

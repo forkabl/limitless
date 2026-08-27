@@ -396,6 +396,27 @@
         "Chromium profile preference registration moves or gains an equivalent product hook."
       ],
       "removal_condition": "Remove when Chromium exposes a supported product profile preference registration seam."
+    },
+    {
+      "file": "0014-webui-searchbox-edit-session.patch",
+      "sha256": "5f859a701cef0108130a70bbd793dccea4b2222a048b1a6c5970d03058c4035a",
+      "upstream_files": ["chrome/browser/resources/webui_browser/webui_browser_searchbox.ts"],
+      "upstream_symbols": [
+        "WebuiBrowserSearchboxElement.setInputText",
+        "WebuiBrowserSearchboxElement.finishUserEdit_",
+        "WebuiBrowserSearchboxElement.onInputWrapperKeydown",
+        "WebuiBrowserSearchboxElement.endUserEditSession_",
+        "WebuiBrowserSearchboxElement.navigateToMatch",
+        "WebuiBrowserSearchboxElement.openCtrlEnterMatch",
+        "WebuiBrowserSearchboxElement.onMatchClick",
+        "WebuiBrowserSearchboxElement.onInputFocusin_",
+        "WebuiBrowserSearchboxElement.onInputWrapperFocusout",
+        "WebuiBrowserSearchboxElement.onSearchboxInputTextUpdated_"
+      ],
+      "limitless_targets": ["$limitless_root/build/chromium:webui_browser_tests"],
+      "tests": ["//chrome/test:browser_tests --gtest_filter=LimitlessWebUIBrowserTest.AddressEditSessionPreservesAndCommitsProjections:LimitlessWebUIBrowserTest.GateTwoUpstreamShellSeamPreservesEmbeddedTabState"],
+      "conflict_signals": ["Chromium changes WebUI searchbox edit-session or accepted-navigation ownership.", "Chromium adds equivalent committed-projection protection."],
+      "removal_condition": "Remove when upstream edit-session ownership prevents committed tab projections from overwriting active user drafts and provides cancel/navigation lifecycle."
     }
   ]
 }

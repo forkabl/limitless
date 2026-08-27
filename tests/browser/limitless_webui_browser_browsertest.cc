@@ -442,6 +442,8 @@ class LimitlessWebUIBrowserTest : public InProcessBrowserTest {
                      address?.selectedMatch?.destinationUrl ?? null,
                  selectedAllowed:
                      address?.selectedMatch?.allowedToBeDefaultMatch ?? null,
+                 userInputInProgress: address?.userInputInProgress_ ?? null,
+                 committedInputText: address?.committedInputText_ ?? null,
                });
              })()
            )")
@@ -1007,6 +1009,152 @@ IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
   EXPECT_NE(nullptr, BrowserView::GetBrowserViewForBrowser(popup));
 
   CloseBrowserSynchronously(popup);
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
+                       AddressEditSessionPreservesAndCommitsProjections) {
+  base::test::ScopedRunLoopTimeout timeout(FROM_HERE, base::Seconds(30));
+  ASSERT_TRUE(content::WaitForLoadStop(GetShellContents()));
+  content::WebContents* shell = GetShellContents();
+  ASSERT_TRUE(content::EvalJs(shell, R"(
+    (() => { const app = document.querySelector('webui-browser-app');
+      const address = app?.shadowRoot?.querySelector('#address');
+      if (!address) throw new Error('address control missing');
+      address.setInputText('committed-a'); return true; })()
+  )")
+                  .ExtractBool());
+  const auto begin_edit = [this, shell]() {
+    std::optional<gfx::Point> center;
+    ASSERT_TRUE(base::test::RunUntil([this, &center]() {
+      center = GetAddressInputCenter();
+      return center.has_value();
+    }));
+    ASSERT_TRUE(center.has_value());
+    content::SimulateMouseClickAt(shell, 0, blink::WebMouseEvent::Button::kLeft,
+                                  *center);
+    ASSERT_TRUE(base::test::RunUntil([this]() { return AddressHasFocus(); }));
+    const int length = AddressValueLength();
+    ASSERT_GE(length, 0);
+    content::SimulateKeyPressWithoutChar(shell, ui::DomKey::END,
+                                         ui::DomCode::END, ui::VKEY_END, false,
+                                         false, false, false);
+    content::SimulateKeyPressWithoutChar(shell, ui::DomKey::HOME,
+                                         ui::DomCode::HOME, ui::VKEY_HOME,
+                                         false, true, false, false);
+    ASSERT_TRUE(base::test::RunUntil(
+        [this, length]() { return AddressValueIsFullySelected(length); }));
+    content::SimulateKeyPress(shell, ui::DomKey::BACKSPACE,
+                              ui::DomCode::BACKSPACE, ui::VKEY_BACK, false,
+                              false, false, false);
+    ASSERT_TRUE(base::test::RunUntil([this]() {
+      return AddressEmptyStateSettled();
+    })) << AddressStateDescription();
+  };
+  ASSERT_NO_FATAL_FAILURE(begin_edit());
+  for (char c : std::string("draft")) {
+    content::SimulateCharTyped(shell, static_cast<unsigned char>(c));
+  }
+  ASSERT_TRUE(content::EvalJs(shell, R"(
+    (() => document.querySelector('webui-browser-app')?.shadowRoot
+      ?.querySelector('#address')?.setInputText('committed-b'))()
+  )")
+                  .is_ok());
+  ASSERT_TRUE(base::test::RunUntil([this]() {
+    return AddressValueEquals("draft");
+  })) << AddressStateDescription();
+  content::SimulateKeyPress(shell, ui::DomKey::ESCAPE, ui::DomCode::ESCAPE,
+                            ui::VKEY_ESCAPE, false, false, false, false);
+  ASSERT_TRUE(base::test::RunUntil([this]() {
+    return AddressValueEquals("committed-b");
+  })) << AddressStateDescription();
+  ASSERT_TRUE(content::EvalJs(shell, R"(
+    (() => { const a = document.querySelector('webui-browser-app')
+      ?.shadowRoot?.querySelector('#address'); return a.activeQueryId === -1 &&
+      a.lastQueriedInput === null && a.selectedMatchIndex === -1 &&
+      a.selectedMatch === null; })()
+  )")
+                  .ExtractBool())
+      << AddressStateDescription();
+
+  // Editing can resume while focus remains in the control after Escape.
+  ASSERT_NO_FATAL_FAILURE(begin_edit());
+  for (char c : std::string("draft-again")) {
+    content::SimulateCharTyped(shell, static_cast<unsigned char>(c));
+  }
+  ASSERT_TRUE(base::test::RunUntil([this]() {
+    return AddressValueEquals("draft-again");
+  })) << AddressStateDescription();
+
+  ASSERT_NO_FATAL_FAILURE(begin_edit());
+  for (char c : std::string("draft-2")) {
+    content::SimulateCharTyped(shell, static_cast<unsigned char>(c));
+  }
+  ASSERT_TRUE(content::EvalJs(shell, R"(
+    (() => { const a = document.querySelector('webui-browser-app')
+      ?.shadowRoot?.querySelector('#address'); a.setInputText('committed-c');
+      a.setInputText('committed-d'); return true; })()
+  )")
+                  .ExtractBool());
+  ASSERT_TRUE(base::test::RunUntil([this]() {
+    return AddressValueEquals("draft-2");
+  })) << AddressStateDescription();
+  ASSERT_TRUE(content::EvalJs(shell, R"(
+    (() => { const i = document.querySelector('webui-browser-app')
+      ?.shadowRoot?.querySelector('#address')?.shadowRoot?.querySelector('#input')
+      ?.shadowRoot?.querySelector('#input'); i.blur(); return true; })()
+  )")
+                  .ExtractBool());
+  ASSERT_TRUE(base::test::RunUntil([this]() {
+    return AddressValueEquals("committed-d");
+  })) << AddressStateDescription();
+
+  const GURL destination = https_server_.GetURL("a.test", "/page-a-next");
+  ASSERT_NO_FATAL_FAILURE(begin_edit());
+  for (char c : destination.spec()) {
+    content::SimulateCharTyped(shell, static_cast<unsigned char>(c));
+  }
+  ASSERT_TRUE(base::test::RunUntil([this, &destination]() {
+    return AddressValueEquals(destination.spec()) &&
+           AddressHasCurrentDefaultMatch(destination);
+  })) << AddressStateDescription();
+  ASSERT_TRUE(content::EvalJs(shell, R"(
+    (() => document.querySelector('webui-browser-app')?.shadowRoot
+      ?.querySelector('#address')?.setInputText('stale-committed'))()
+  )")
+                  .is_ok());
+  ASSERT_TRUE(base::test::RunUntil([this, &destination]() {
+    return AddressValueEquals(destination.spec());
+  })) << AddressStateDescription();
+  content::WebContents* active_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+  ASSERT_TRUE(active_contents);
+  content::TestNavigationObserver navigation(destination);
+  navigation.WatchWebContents(active_contents);
+  content::SimulateKeyPress(shell, ui::DomKey::ENTER, ui::DomCode::ENTER,
+                            ui::VKEY_RETURN, false, false, false, false);
+  navigation.Wait();
+  ASSERT_TRUE(navigation.last_navigation_succeeded());
+  ASSERT_EQ(destination, navigation.last_navigation_url());
+  ASSERT_EQ(destination, active_contents->GetLastCommittedURL());
+  ASSERT_TRUE(content::WaitForLoadStop(active_contents));
+  ASSERT_TRUE(base::test::RunUntil([this]() { return !AddressHasFocus(); }))
+      << "Address retained focus after accepted navigation: "
+      << AddressStateDescription();
+  ASSERT_TRUE(base::test::RunUntil([this, &destination]() {
+    return AddressValueEquals(destination.spec());
+  })) << AddressStateDescription();
+  ASSERT_NO_FATAL_FAILURE(begin_edit());
+  for (char c : std::string("post-navigation-draft")) {
+    content::SimulateCharTyped(shell, static_cast<unsigned char>(c));
+  }
+  ASSERT_TRUE(base::test::RunUntil([this]() {
+    return AddressValueEquals("post-navigation-draft");
+  })) << AddressStateDescription();
+  content::SimulateKeyPress(shell, ui::DomKey::ESCAPE, ui::DomCode::ESCAPE,
+                            ui::VKEY_ESCAPE, false, false, false, false);
+  ASSERT_TRUE(base::test::RunUntil([this, &destination]() {
+    return AddressValueEquals(destination.spec());
+  })) << AddressStateDescription();
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessWebUIBrowserTest,
