@@ -75,7 +75,7 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
   EXPECT_TRUE(e.token);
   EXPECT_TRUE(e.descriptor);
   EXPECT_EQ(e.token_contents, "cap");
-  auto parsed = base::JSONReader::Read(e.descriptor_contents);
+  auto parsed = base::JSONReader::Read(e.descriptor_contents, 0);
   ASSERT_TRUE(parsed.has_value());
   const base::DictValue* dict = parsed->GetIfDict();
   ASSERT_TRUE(dict);
