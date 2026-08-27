@@ -22,14 +22,14 @@ and backend write failures. Effective values are read back from the backend,
 never echoed from the request. Every typed request outcome is sent to a bounded
 audit sink without recording credentials, paths, WebContents, or raw handles.
 
-This checkpoint intentionally does not claim the running-profile journey. The
-next slice supplies the registered non-sync Chromium profile preference,
-opaque profile identity and capability issuance, live `PrefChangeRegistrar`
-projection into the native SwiftUI rail, clean restart proof, and a real
-running-process CLI or agent transport. Malformed transport requests will be
-audited at that adapter boundary. Leader and split host routes remain unchanged
-until the registry receives exact-window Chromium-backed query and execution
-adapters.
+The running-profile slice now supplies the registered non-sync Chromium
+preference, opaque profile identity and capability issuance, live
+`PrefChangeRegistrar` projection into the native SwiftUI rail, and bounded
+append-only audit retention (256 records). External running-process CLI or
+agent transport and clean process-restart coverage remain future work.
+Malformed transport requests will be audited at that transport boundary.
+Leader and split host routes remain unchanged until the registry receives
+exact-window Chromium-backed query and execution adapters.
 
 The design keeps Chromium authoritative for browser commands, tab order,
 workspace membership, and split state. Product control planes carry typed

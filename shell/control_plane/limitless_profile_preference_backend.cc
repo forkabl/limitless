@@ -19,6 +19,7 @@
 
 namespace limitless {
 namespace {
+constexpr size_t kMaximumPersistedAuditRecords = 256;
 
 constexpr char kCompactValue[] = "compact";
 constexpr char kComfortableValue[] = "comfortable";
@@ -174,6 +175,8 @@ uint64_t ProfilePreferenceControlBackend::AppendAuditRecord(
   {
     ScopedListPrefUpdate audit(prefs_, kPreferenceAuditRecordsPref);
     audit->Append(PreferenceAuditRecordToValue(stored_record));
+    while (audit->size() > kMaximumPersistedAuditRecords)
+      audit->Erase(audit->begin());
   }
   prefs_->SetInt64(kPreferenceAuditSequencePref, sequence);
   return static_cast<uint64_t>(sequence);
