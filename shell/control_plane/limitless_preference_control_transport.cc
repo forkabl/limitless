@@ -5,8 +5,6 @@
 #include "limitless_preference_control_transport.h"
 
 #include "base/functional/bind.h"
-#include "base/task/thread_pool.h"
-#include "base/task/task_traits.h"
 #include "base/time/time.h"
 #include "limitless_preference_control_protocol.h"
 #include "limitless_preference_control_service.h"
@@ -79,13 +77,27 @@ void PreferenceControlTransport::StartAsync(StartCallback callback) {
   inputs.instance_id = instance;
   inputs.capability = std::string(backend_->capability());
   inputs.accepted_fd_for_testing = testing_hooks_.accepted_fd;
+  inputs.entering_accept_wait_for_testing = testing_hooks_.entering_accept_wait;
   inputs.should_exit_run_for_testing = testing_hooks_.should_exit_run;
+  if (!worker_thread_) {
+    worker_thread_ =
+        std::make_unique<base::Thread>("LimitlessPreferenceControlTransport");
+    const bool allowed = !testing_hooks_.allow_thread_start_for_testing ||
+                         testing_hooks_.allow_thread_start_for_testing.Run();
+    const bool started = allowed && worker_thread_->Start();
+    if (!started) {
+      worker_thread_.reset();
+      state_ = State::kStopped;
+      origin_task_runner_->PostTask(
+          FROM_HERE,
+          base::BindOnce(
+              std::move(pending_start_callback_),
+              PreferenceControlTransportStartStatus::kThreadStartFailed));
+      return;
+    }
+  }
   worker_ = base::SequenceBound<PreferenceControlTransportWorker>(
-      base::ThreadPool::CreateSequencedTaskRunner(
-          {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
-           base::WithBaseSyncPrimitives(),
-           base::TaskShutdownBehavior::BLOCK_SHUTDOWN}),
-      std::move(inputs), cancellation_);
+      worker_thread_->task_runner(), std::move(inputs), cancellation_);
   worker_.AsyncCall(&PreferenceControlTransportWorker::Prepare)
       .Then(base::BindOnce(&PreferenceControlTransport::OnPrepared,
                            weak_factory_.GetWeakPtr(), generation));

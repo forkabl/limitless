@@ -6,6 +6,7 @@
 #define LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_TRANSPORT_H_
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "base/files/file_path.h"
@@ -14,6 +15,7 @@
 #include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/sequence_bound.h"
+#include "base/threading/thread.h"
 #include "limitless_preference_control_transport_worker.h"
 #include "limitless_profile_preference_backend.h"
 
@@ -41,7 +43,9 @@ class PreferenceControlTransport {
       base::OnceCallback<void(PreferenceControlTransportStartStatus)>;
   struct TestingHooks {
     base::RepeatingCallback<void(int)> accepted_fd;
+    base::RepeatingClosure entering_accept_wait;
     base::RepeatingCallback<bool()> should_exit_run;
+    base::RepeatingCallback<bool()> allow_thread_start_for_testing;
     base::RepeatingClosure entered_stopping_after_unexpected_run_exit;
   };
   PreferenceControlTransport(ProfilePreferenceControlBackend*, base::FilePath);
@@ -75,6 +79,7 @@ class PreferenceControlTransport {
   const base::FilePath runtime_directory_;
   const scoped_refptr<base::SequencedTaskRunner> origin_task_runner_;
   base::FilePath descriptor_path_, credential_path_, socket_path_;
+  std::unique_ptr<base::Thread> worker_thread_;
   base::SequenceBound<PreferenceControlTransportWorker> worker_;
   scoped_refptr<TransportCancellationState> cancellation_;
   State state_ = State::kStopped;
