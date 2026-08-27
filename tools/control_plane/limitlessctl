@@ -81,6 +81,9 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
         value["instance_id"]
     ):
         raise ControlError("invalid_descriptor")
+    endpoint_stem = f'{value["profile_id"]}.{value["instance_id"]}'
+    if path.name != f"{endpoint_stem}.json":
+        raise ControlError("invalid_descriptor")
     pid = value["pid"]
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise ControlError("invalid_descriptor")
@@ -91,7 +94,10 @@ def _read_descriptor(path: Path, runtime: Path) -> dict[str, object]:
     if not stat.S_ISSOCK(socket_metadata.st_mode):
         raise ControlError("invalid_descriptor")
     credential_path = Path(value["credential_path"])
-    if credential_path.parent != runtime or credential_path.suffix != ".token":
+    if (
+        credential_path.parent != runtime
+        or credential_path.name != f"{endpoint_stem}.token"
+    ):
         raise ControlError("invalid_descriptor")
     credential_metadata = _safe_file(credential_path, 0o600)
     if not stat.S_ISREG(credential_metadata.st_mode) or credential_metadata.st_size > 256:
@@ -261,23 +267,20 @@ def main(argv: list[str]) -> int:
         capability = _read_capability(descriptor)
         operation = "read" if arguments.preference_command == "get" else "write"
         value = getattr(arguments, "value", None)
-        _emit(
-            _exchange(
-                descriptor,
-                _preference_request(
-                    descriptor, capability, operation, arguments.key, value
-                ),
-            )
+        result = _exchange(
+            descriptor,
+            _preference_request(
+                descriptor, capability, operation, arguments.key, value
+            ),
         )
-        return 0
+        _emit(result)
+        return 0 if isinstance(result, dict) and result.get("status") == "success" else 3
     except ControlError as error:
         result: dict[str, object] = {
             "version": PROTOCOL_VERSION,
             "status": "error",
             "error": error.code,
         }
-        if error.detail:
-            result["detail"] = error.detail
         _emit(result)
         return 2
 

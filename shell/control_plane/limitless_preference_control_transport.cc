@@ -27,6 +27,7 @@
 #include "base/functional/bind.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
+#include "base/scoped_closure_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 
@@ -36,9 +37,31 @@ namespace {
 constexpr base::TimeDelta kTransportIoTimeout = base::Seconds(2);
 constexpr int kListenBacklog = 4;
 
-bool ReadExactly(int fd, void* destination, size_t length) {
+bool ConfigureIoDeadline(int fd, base::TimeTicks deadline) {
+  base::TimeDelta remaining = deadline - base::TimeTicks::Now();
+  if (!remaining.is_positive()) {
+    return false;
+  }
+  const int64_t microseconds = std::max<int64_t>(1, remaining.InMicroseconds());
+  const timeval timeout = {
+      .tv_sec = static_cast<time_t>(microseconds / 1000000),
+      .tv_usec = static_cast<suseconds_t>(microseconds % 1000000),
+  };
+  return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ==
+             0 &&
+         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+             0;
+}
+
+bool ReadExactly(int fd,
+                 void* destination,
+                 size_t length,
+                 base::TimeTicks deadline) {
   auto* output = static_cast<unsigned char*>(destination);
   while (length > 0) {
+    if (!ConfigureIoDeadline(fd, deadline)) {
+      return false;
+    }
     const ssize_t read_size = read(fd, output, length);
     if (read_size == 0) {
       return false;
@@ -55,9 +78,15 @@ bool ReadExactly(int fd, void* destination, size_t length) {
   return true;
 }
 
-bool WriteExactly(int fd, const void* source, size_t length) {
+bool WriteExactly(int fd,
+                  const void* source,
+                  size_t length,
+                  base::TimeTicks deadline) {
   const auto* input = static_cast<const unsigned char*>(source);
   while (length > 0) {
+    if (!ConfigureIoDeadline(fd, deadline)) {
+      return false;
+    }
     const ssize_t write_size = send(fd, input, length, MSG_NOSIGNAL);
     if (write_size < 0) {
       if (errno == EINTR) {
@@ -107,15 +136,6 @@ bool WritePrivateFileAtomically(const base::FilePath& path,
   return true;
 }
 
-void ConfigureIoDeadline(int fd) {
-  const timeval timeout = {
-      .tv_sec = static_cast<time_t>(kTransportIoTimeout.InSeconds()),
-      .tv_usec = 0,
-  };
-  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-}
-
 bool IsCurrentUserPeer(int fd) {
   uid_t peer_uid = 0;
   gid_t peer_gid = 0;
@@ -132,13 +152,15 @@ std::string SerializeParseError(PreferenceRequestParseStatus status) {
   return serialized;
 }
 
-bool SendFramedResponse(int fd, std::string_view response) {
+bool SendFramedResponse(int fd,
+                        std::string_view response,
+                        base::TimeTicks deadline) {
   if (response.size() > kMaximumPreferenceTransportResponseBytes) {
     return false;
   }
   const uint32_t frame_size = htonl(static_cast<uint32_t>(response.size()));
-  return WriteExactly(fd, &frame_size, sizeof(frame_size)) &&
-         WriteExactly(fd, response.data(), response.size());
+  return WriteExactly(fd, &frame_size, sizeof(frame_size), deadline) &&
+         WriteExactly(fd, response.data(), response.size(), deadline);
 }
 
 }  // namespace
@@ -147,6 +169,7 @@ struct PreferenceControlTransport::PendingResponse {
   std::mutex mutex;
   std::condition_variable ready;
   std::optional<std::string> response;
+  bool cancelled = false;
 };
 
 PreferenceControlTransport::PreferenceControlTransport(
@@ -324,8 +347,9 @@ void PreferenceControlTransport::AcceptLoop(
                        origin_weak_ptr, std::move(payload), pending));
     std::unique_lock lock(pending->mutex);
     if (!pending->ready.wait_for(
-            lock, std::chrono::milliseconds(kTransportIoTimeout.InMilliseconds()),
-                                 [&pending] { return pending->response; })) {
+            lock,
+            std::chrono::milliseconds(kTransportIoTimeout.InMilliseconds()),
+            [&pending] { return pending->response.has_value(); })) {
       continue;
     }
     SendFramedResponse(connection.get(), *pending->response);

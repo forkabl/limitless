@@ -26,26 +26,23 @@ IN_PROC_BROWSER_TEST_F(LimitlessRunningProfileControlRegistryBrowserTest,
   int first_changes = 0;
   int second_changes = 0;
   auto first = registry.RegisterWindow(
-      browser(), base::BindRepeating(
-                     [](int* count, const EffectivePreferenceValue&) {
-                       ++*count;
-                     },
-                     &first_changes));
+      browser(),
+      base::BindRepeating(
+          [](int* count, const EffectivePreferenceValue&) { ++*count; },
+          &first_changes));
   ASSERT_TRUE(first);
   ProfilePreferenceControlBackend* const backend = first->backend();
   ASSERT_TRUE(backend);
   const std::string profile_identifier(backend->profile_identifier());
-  const std::string instance_identifier(
-      backend->profile_instance_identifier());
+  const std::string instance_identifier(backend->profile_instance_identifier());
 
   Browser* second_browser = CreateBrowser(browser()->GetProfile());
   ASSERT_TRUE(second_browser);
   auto second = registry.RegisterWindow(
-      second_browser, base::BindRepeating(
-                          [](int* count, const EffectivePreferenceValue&) {
-                            ++*count;
-                          },
-                          &second_changes));
+      second_browser,
+      base::BindRepeating(
+          [](int* count, const EffectivePreferenceValue&) { ++*count; },
+          &second_changes));
   ASSERT_TRUE(second);
   EXPECT_EQ(backend, second->backend());
   EXPECT_EQ(1u, registry.profile_count_for_testing());
@@ -62,9 +59,12 @@ IN_PROC_BROWSER_TEST_F(LimitlessRunningProfileControlRegistryBrowserTest,
   EXPECT_EQ(1, first_changes);
   EXPECT_EQ(1, second_changes);
 
-  second.reset();
+  CloseBrowserSynchronously(second_browser);
+  EXPECT_EQ(nullptr, second->backend());
+  EXPECT_EQ(nullptr, second->browser_window());
   EXPECT_EQ(1u, registry.window_count_for_testing(profile_identifier));
   EXPECT_EQ(backend, registry.FindBackend(profile_identifier));
+  second.reset();
   first.reset();
   EXPECT_EQ(0u, registry.profile_count_for_testing());
   EXPECT_EQ(nullptr, registry.FindBackend(profile_identifier));

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 
 #include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
@@ -64,6 +65,7 @@ class PreferenceControlTransport {
   bool WriteCredential();
   bool WriteDescriptor();
   void AcceptLoop(base::WeakPtr<PreferenceControlTransport> origin_weak_ptr);
+  void ClearAcceptedConnection(int descriptor);
   void HandleRequestOnOrigin(std::string payload,
                              std::shared_ptr<PendingResponse> pending);
 
@@ -74,6 +76,11 @@ class PreferenceControlTransport {
   base::FilePath credential_path_;
   base::FilePath socket_path_;
   base::ScopedFD listen_fd_;
+  std::atomic<int> listen_descriptor_{-1};
+  std::mutex accepted_connection_mutex_;
+  int accepted_connection_descriptor_ = -1;
+  std::mutex pending_response_mutex_;
+  std::weak_ptr<PendingResponse> pending_response_;
   base::Thread io_thread_{"LimitlessPreferenceControl"};
   std::atomic<bool> stopping_{false};
   bool running_ = false;

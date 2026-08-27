@@ -22,7 +22,7 @@ struct RunningProfileControlRegistry::ProfileEntry {
         backend(profile,
                 base::BindRepeating(&ProfileEntry::NotifyValueChanged,
                                     base::Unretained(this))),
-        transport(&backend, profile->GetPath()) {
+        transport(&backend, profile->GetPath().DirName()) {
     transport.Start();
   }
 
