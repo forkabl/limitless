@@ -301,6 +301,18 @@ PreferenceControlTransportWorker::~PreferenceControlTransportWorker() {
 }
 
 PreferenceControlTransportWorker::PrepareResult
+PreferenceControlTransportWorker::FailPrepare(WorkerPrepareStatus status) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  Cleanup();
+  PrepareResult result;
+  result.status = status;
+  result.socket_path = inputs_.socket_path;
+  result.descriptor_path = inputs_.descriptor_path;
+  result.credential_path = inputs_.credential_path;
+  return result;
+}
+
+PreferenceControlTransportWorker::PrepareResult
 PreferenceControlTransportWorker::Prepare() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   PrepareResult result;
@@ -311,10 +323,9 @@ PreferenceControlTransportWorker::Prepare() {
       (mkdir(inputs_.runtime_directory.value().c_str(),
              kPrivateDirectoryMode) != 0 &&
        errno != EEXIST)) {
-    result.status = cancellation_->cancelled.load()
-                        ? WorkerPrepareStatus::kCancelled
-                        : WorkerPrepareStatus::kRuntimeDirectory;
-    return result;
+    return FailPrepare(cancellation_->cancelled.load()
+                           ? WorkerPrepareStatus::kCancelled
+                           : WorkerPrepareStatus::kRuntimeDirectory);
   }
   runtime_directory_fd_.reset(
       open(inputs_.runtime_directory.value().c_str(),
@@ -327,9 +338,9 @@ PreferenceControlTransportWorker::Prepare() {
       fstat(runtime_directory_fd_.get(), &runtime_check) != 0 ||
       !S_ISDIR(runtime_check.st_mode) || runtime_check.st_uid != geteuid() ||
       (runtime_check.st_mode & 0777) != kPrivateDirectoryMode) {
-    result.status = WorkerPrepareStatus::kRuntimeDirectory;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kRuntimeDirectory);
   }
+  runtime_directory_identity_ = {runtime_check.st_dev, runtime_check.st_ino};
 
   std::string socket_basename;
   std::string descriptor_basename;
@@ -340,27 +351,23 @@ PreferenceControlTransportWorker::Prepare() {
                            &descriptor_basename) ||
       !GetArtifactBasename(inputs_.runtime_directory, inputs_.credential_path,
                            &credential_basename)) {
-    result.status = WorkerPrepareStatus::kRuntimeDirectory;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kRuntimeDirectory);
   }
   listener_.reset(socket(AF_UNIX, SOCK_STREAM, 0));
   if (!listener_.is_valid()) {
-    result.status = WorkerPrepareStatus::kSocket;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kSocket);
   }
   int flags = fcntl(listener_.get(), F_GETFD);
   int status = fcntl(listener_.get(), F_GETFL);
   if (flags < 0 || status < 0 ||
       fcntl(listener_.get(), F_SETFD, flags | FD_CLOEXEC) != 0 ||
       fcntl(listener_.get(), F_SETFL, status | O_NONBLOCK) != 0) {
-    result.status = WorkerPrepareStatus::kSocket;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kSocket);
   }
   sockaddr_un address = {};
   address.sun_family = AF_UNIX;
   if (inputs_.socket_path.value().size() >= sizeof(address.sun_path)) {
-    result.status = WorkerPrepareStatus::kSocket;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kSocket);
   }
   memcpy(address.sun_path, inputs_.socket_path.value().c_str(),
          inputs_.socket_path.value().size() + 1);
@@ -373,44 +380,78 @@ PreferenceControlTransportWorker::Prepare() {
   if (socket_check == PathCheck::kExists ||
       descriptor_check == PathCheck::kExists ||
       credential_check == PathCheck::kExists) {
-    result.status = WorkerPrepareStatus::kCollision;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kCollision);
   }
   if (socket_check == PathCheck::kError ||
       descriptor_check == PathCheck::kError ||
       credential_check == PathCheck::kError) {
-    result.status = WorkerPrepareStatus::kSocket;
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kSocket);
+  }
+  if (inputs_.before_socket_bind_for_testing) {
+    inputs_.before_socket_bind_for_testing.Run();
+  }
+  base::ScopedFD pre_bind_runtime_directory_fd(
+      open(inputs_.runtime_directory.value().c_str(),
+           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+  struct stat pre_bind_runtime_check = {};
+  if (!pre_bind_runtime_directory_fd.is_valid() ||
+      fstat(pre_bind_runtime_directory_fd.get(), &pre_bind_runtime_check) !=
+          0 ||
+      !StatMatchesIdentity(pre_bind_runtime_check, S_IFDIR,
+                           runtime_directory_identity_) ||
+      (pre_bind_runtime_check.st_mode & 0777) != kPrivateDirectoryMode) {
+    return FailPrepare(WorkerPrepareStatus::kSocket);
   }
   if (bind(listener_.get(), reinterpret_cast<sockaddr*>(&address),
            offsetof(sockaddr_un, sun_path) +
                inputs_.socket_path.value().size() + 1) != 0) {
-    result.status = WorkerPrepareStatus::kSocket;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kSocket);
   }
-  if (!ReadArtifactIdentityAt(runtime_directory_fd_.get(), socket_basename,
-                              S_IFSOCK, &socket_identity_)) {
-    result.status = WorkerPrepareStatus::kSocket;
-    return result;
+
+  if (ReadArtifactIdentityAt(runtime_directory_fd_.get(), socket_basename,
+                             S_IFSOCK, &socket_identity_)) {
+    owns_socket_ = true;
+    bound_socket_directory_fd_.reset(
+        fcntl(runtime_directory_fd_.get(), F_DUPFD_CLOEXEC, 0));
+    if (!bound_socket_directory_fd_.is_valid()) {
+      return FailPrepare(WorkerPrepareStatus::kSocket);
+    }
+  } else {
+    base::ScopedFD current_runtime_directory_fd(
+        open(inputs_.runtime_directory.value().c_str(),
+             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!current_runtime_directory_fd.is_valid() ||
+        !ReadArtifactIdentityAt(current_runtime_directory_fd.get(),
+                                socket_basename, S_IFSOCK, &socket_identity_)) {
+      return FailPrepare(WorkerPrepareStatus::kSocket);
+    }
+    owns_socket_ = true;
+    bound_socket_directory_fd_ = std::move(current_runtime_directory_fd);
   }
-  owns_socket_ = true;
+
+  base::ScopedFD current_runtime_directory_fd(
+      open(inputs_.runtime_directory.value().c_str(),
+           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+  struct stat current_runtime_check = {};
+  if (!current_runtime_directory_fd.is_valid() ||
+      fstat(current_runtime_directory_fd.get(), &current_runtime_check) != 0 ||
+      !StatMatchesIdentity(current_runtime_check, S_IFDIR,
+                           runtime_directory_identity_) ||
+      (current_runtime_check.st_mode & 0777) != kPrivateDirectoryMode) {
+    return FailPrepare(WorkerPrepareStatus::kSocket);
+  }
   if (inputs_.force_post_bind_failure ||
-      fchmodat(runtime_directory_fd_.get(), socket_basename.c_str(),
+      fchmodat(bound_socket_directory_fd_.get(), socket_basename.c_str(),
                kPrivateFileMode, 0) != 0 ||
-      !ArtifactMatchesAt(runtime_directory_fd_.get(), socket_basename, S_IFSOCK,
-                         socket_identity_, true) ||
+      !ArtifactMatchesAt(bound_socket_directory_fd_.get(), socket_basename,
+                         S_IFSOCK, socket_identity_, true) ||
       listen(listener_.get(), 4) != 0) {
-    result.status = WorkerPrepareStatus::kSocket;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kSocket);
   }
   // Establish cancellation before publishing any endpoint artifacts.
   int pipe_fds[2];
   if (pipe(pipe_fds) != 0) {
-    result.status = WorkerPrepareStatus::kCancellationChannel;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kCancellationChannel);
   }
   cancellation_reader_.reset(pipe_fds[0]);
   flags = fcntl(pipe_fds[1], F_GETFD);
@@ -425,37 +466,29 @@ PreferenceControlTransportWorker::Prepare() {
       fcntl(cancellation_reader_.get(), F_SETFL, reader_status | O_NONBLOCK) !=
           0) {
     close(pipe_fds[1]);
-    result.status = WorkerPrepareStatus::kCancellationChannel;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kCancellationChannel);
   }
   cancellation_->InstallWriter(pipe_fds[1]);
   if (inputs_.before_credential_publication_for_testing) {
     inputs_.before_credential_publication_for_testing.Run();
   }
   if (cancellation_->cancelled.load(std::memory_order_acquire)) {
-    result.status = WorkerPrepareStatus::kCancelled;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kCancelled);
   }
   const PublishResult credential_publish_result = WritePrivateFileNoReplaceAt(
       runtime_directory_fd_.get(), credential_basename, inputs_.capability,
       &credential_identity_, &credential_identity_fd_);
   if (credential_publish_result != PublishResult::kSuccess) {
-    result.status = credential_publish_result == PublishResult::kCollision
-                        ? WorkerPrepareStatus::kCollision
-                        : WorkerPrepareStatus::kCredential;
-    Cleanup();
-    return result;
+    return FailPrepare(credential_publish_result == PublishResult::kCollision
+                           ? WorkerPrepareStatus::kCollision
+                           : WorkerPrepareStatus::kCredential);
   }
   owns_credential_ = true;
   if (inputs_.before_descriptor_publication_for_testing) {
     inputs_.before_descriptor_publication_for_testing.Run();
   }
   if (cancellation_->cancelled.load(std::memory_order_acquire)) {
-    result.status = WorkerPrepareStatus::kCancelled;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kCancelled);
   }
   base::DictValue descriptor_value;
   descriptor_value.Set("version", 1);
@@ -466,25 +499,19 @@ PreferenceControlTransportWorker::Prepare() {
   descriptor_value.Set("pid", base::GetCurrentProcId());
   std::string descriptor;
   if (!base::JSONWriter::Write(descriptor_value, &descriptor)) {
-    result.status = WorkerPrepareStatus::kDescriptor;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kDescriptor);
   }
   const PublishResult descriptor_publish_result = WritePrivateFileNoReplaceAt(
       runtime_directory_fd_.get(), descriptor_basename, descriptor,
       &descriptor_identity_, &descriptor_identity_fd_);
   if (descriptor_publish_result != PublishResult::kSuccess) {
-    result.status = descriptor_publish_result == PublishResult::kCollision
-                        ? WorkerPrepareStatus::kCollision
-                        : WorkerPrepareStatus::kDescriptor;
-    Cleanup();
-    return result;
+    return FailPrepare(descriptor_publish_result == PublishResult::kCollision
+                           ? WorkerPrepareStatus::kCollision
+                           : WorkerPrepareStatus::kDescriptor);
   }
   owns_descriptor_ = true;
   if (cancellation_->cancelled.load(std::memory_order_acquire)) {
-    result.status = WorkerPrepareStatus::kCancelled;
-    Cleanup();
-    return result;
+    return FailPrepare(WorkerPrepareStatus::kCancelled);
   }
   published_ = true;
   result.status = WorkerPrepareStatus::kSuccess;
@@ -499,34 +526,38 @@ void PreferenceControlTransportWorker::Run() {
 void PreferenceControlTransportWorker::Cleanup() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   cancellation_->ClearWriter();
-  bool removed_artifact = false;
+  bool removed_runtime_artifact = false;
   if (runtime_directory_fd_.is_valid()) {
-    std::string socket_basename;
     std::string descriptor_basename;
     std::string credential_basename;
     if (owns_descriptor_ &&
         GetArtifactBasename(inputs_.runtime_directory, inputs_.descriptor_path,
                             &descriptor_basename)) {
-      removed_artifact |= QuarantineOwnedArtifactAt(
+      removed_runtime_artifact |= QuarantineOwnedArtifactAt(
           runtime_directory_fd_.get(), descriptor_basename, S_IFREG,
           descriptor_identity_, descriptor_identity_fd_.get());
     }
     if (owns_credential_ &&
         GetArtifactBasename(inputs_.runtime_directory, inputs_.credential_path,
                             &credential_basename)) {
-      removed_artifact |= QuarantineOwnedArtifactAt(
+      removed_runtime_artifact |= QuarantineOwnedArtifactAt(
           runtime_directory_fd_.get(), credential_basename, S_IFREG,
           credential_identity_, credential_identity_fd_.get());
     }
-    if (owns_socket_ &&
-        GetArtifactBasename(inputs_.runtime_directory, inputs_.socket_path,
-                            &socket_basename)) {
-      removed_artifact |= QuarantineOwnedArtifactAt(runtime_directory_fd_.get(),
-                                                    socket_basename, S_IFSOCK,
-                                                    socket_identity_, -1);
-    }
-    if (removed_artifact) {
+    if (removed_runtime_artifact) {
       FsyncNoIntr(runtime_directory_fd_.get());
+    }
+  }
+  const int socket_directory_fd = bound_socket_directory_fd_.is_valid()
+                                      ? bound_socket_directory_fd_.get()
+                                      : runtime_directory_fd_.get();
+  if (owns_socket_ && socket_directory_fd >= 0) {
+    std::string socket_basename;
+    if (GetArtifactBasename(inputs_.runtime_directory, inputs_.socket_path,
+                            &socket_basename) &&
+        QuarantineOwnedArtifactAt(socket_directory_fd, socket_basename,
+                                  S_IFSOCK, socket_identity_, -1)) {
+      FsyncNoIntr(socket_directory_fd);
     }
   }
 
@@ -534,11 +565,13 @@ void PreferenceControlTransportWorker::Cleanup() {
   cancellation_reader_.reset();
   credential_identity_fd_.reset();
   descriptor_identity_fd_.reset();
+  bound_socket_directory_fd_.reset();
   runtime_directory_fd_.reset();
   owns_socket_ = owns_descriptor_ = owns_credential_ = false;
   socket_identity_ = {};
   credential_identity_ = {};
   descriptor_identity_ = {};
+  runtime_directory_identity_ = {};
   published_ = false;
 }
 

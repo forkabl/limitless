@@ -49,6 +49,7 @@ class PreferenceControlTransportWorker {
     std::string instance_id;
     std::string capability;
     bool force_post_bind_failure = false;
+    base::RepeatingClosure before_socket_bind_for_testing;
     base::RepeatingClosure before_credential_publication_for_testing;
     base::RepeatingClosure before_descriptor_publication_for_testing;
   };
@@ -79,11 +80,14 @@ class PreferenceControlTransportWorker {
   void Cleanup();
 
  private:
+  PrepareResult FailPrepare(WorkerPrepareStatus status);
+
   SEQUENCE_CHECKER(sequence_checker_);
   Inputs inputs_;
   scoped_refptr<TransportCancellationState> cancellation_;
   base::ScopedFD listener_;
   base::ScopedFD runtime_directory_fd_;
+  base::ScopedFD bound_socket_directory_fd_;
   base::ScopedFD cancellation_reader_;
   base::ScopedFD credential_identity_fd_;
   base::ScopedFD descriptor_identity_fd_;
@@ -91,6 +95,7 @@ class PreferenceControlTransportWorker {
   bool owns_socket_ = false;
   bool owns_credential_ = false;
   bool owns_descriptor_ = false;
+  ArtifactIdentity runtime_directory_identity_;
   ArtifactIdentity socket_identity_, credential_identity_, descriptor_identity_;
 };
 

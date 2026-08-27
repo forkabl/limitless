@@ -1,6 +1,8 @@
 #include "shell/control_plane/limitless_preference_control_transport_worker.h"
 
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "base/files/file_enumerator.h"
@@ -21,6 +23,26 @@ void CancelState(scoped_refptr<TransportCancellationState> state) {
 }
 void WriteForeignDescriptor(base::FilePath path) {
   base::WriteFile(path, "foreign-descriptor");
+}
+void SwapRuntimeDirectory(base::FilePath current,
+                          base::FilePath old_path,
+                          bool* succeeded) {
+  *succeeded = rename(current.value().c_str(), old_path.value().c_str()) == 0 &&
+               base::CreateDirectory(current);
+  if (!*succeeded) {
+    return;
+  }
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  sockaddr_un address = {};
+  address.sun_family = AF_UNIX;
+  std::string path = old_path.AppendASCII("s").value();
+  memcpy(address.sun_path, path.c_str(), path.size() + 1);
+  *succeeded =
+      fd >= 0 && bind(fd, reinterpret_cast<sockaddr*>(&address),
+                      offsetof(sockaddr_un, sun_path) + path.size() + 1) == 0;
+  if (fd >= 0) {
+    close(fd);
+  }
 }
 struct Evidence {
   PreferenceControlTransportWorker::PrepareResult result;
@@ -377,6 +399,42 @@ TEST(LimitlessPreferenceControlTransportWorkerTest,
             PreferenceControlTransportWorker::WorkerPrepareStatus::kCollision);
   EXPECT_FALSE(e.socket);
   EXPECT_FALSE(e.token);
+}
+
+TEST(LimitlessPreferenceControlTransportWorkerTest,
+     RuntimeDirectorySwapDuringBindLeavesNoSocket) {
+  base::test::TaskEnvironment env;
+  base::ScopedTempDir t;
+  ASSERT_TRUE(t.CreateUniqueTempDir());
+  auto in = Inputs(t.GetPath());
+  auto old_path = t.GetPath().AppendASCII("r-old");
+  bool hook_succeeded = false;
+  in.before_socket_bind_for_testing = base::BindRepeating(
+      &SwapRuntimeDirectory, in.runtime_directory, old_path, &hook_succeeded);
+  Evidence e =
+      RunWorker(in, base::MakeRefCounted<TransportCancellationState>());
+  EXPECT_TRUE(hook_succeeded);
+  EXPECT_EQ(e.result.status,
+            PreferenceControlTransportWorker::WorkerPrepareStatus::kSocket);
+  EXPECT_FALSE(base::PathExists(in.socket_path));
+  EXPECT_FALSE(base::PathExists(in.credential_path));
+  EXPECT_FALSE(base::PathExists(in.descriptor_path));
+  EXPECT_TRUE(base::DirectoryExists(old_path));
+  struct stat foreign_socket = {};
+  ASSERT_EQ(stat(old_path.AppendASCII("s").value().c_str(), &foreign_socket),
+            0);
+  EXPECT_TRUE(S_ISSOCK(foreign_socket.st_mode));
+  EXPECT_FALSE(base::PathExists(old_path.AppendASCII("t")));
+  EXPECT_FALSE(base::PathExists(old_path.AppendASCII("d")));
+  base::FileEnumerator old_entries(old_path, false,
+                                   base::FileEnumerator::FILES);
+  for (base::FilePath path = old_entries.Next(); !path.empty();
+       path = old_entries.Next()) {
+    EXPECT_EQ(path.BaseName().value().find(".limitless-publish-"),
+              std::string::npos);
+    EXPECT_EQ(path.BaseName().value().find(".limitless-quarantine-"),
+              std::string::npos);
+  }
 }
 }  // namespace
 }  // namespace limitless
