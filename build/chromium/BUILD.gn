@@ -51,13 +51,17 @@ source_set("swiftui_browser_tests") {
   frameworks = [ "AppKit.framework" ]
 
   sources = [
+    "../../tests/commands/limitless_command_registry_unittest.cc",
     "../../tests/browser/limitless_split_pane_controller_browsertest.cc",
+    "../../tests/browser/limitless_control_plane_browsertest.cc",
     "../../tests/browser/limitless_swiftui_browsertest.mm",
   ]
 
   deps = [
     "../../shell/agents:agent_presence",
     "../../shell/agents:agent_presence_tests",
+    "../../shell/commands:command_registry",
+    "../../shell/control_plane:preference_control",
     "../../shell/native/swiftui_rail:rail",
     "../../shell/splits:core",
     "../../shell/workspaces:core",

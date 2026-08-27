@@ -1,0 +1,17 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+config("preference_control_public") {
+  include_dirs = [ "." ]
+}
+
+source_set("preference_control") {
+  sources = [
+    "limitless_preference_control_service.cc",
+    "limitless_preference_control_service.h",
+  ]
+
+  public_deps = [ "//base" ]
+  public_configs = [ ":preference_control_public" ]
+}

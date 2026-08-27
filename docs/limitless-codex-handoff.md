@@ -70,9 +70,14 @@ longer crashes on native fullscreen entry, while completion remains externally
 red at the same waiter as stock Chromium. Split-window teardown, bounded typed
 same-regular-profile transfer, single-member authoritative dissolution, and
 private/popup product boundaries are now green without parallel transfer state.
-Continue with the external fullscreen, Mac arm64 system-drag, hardware-input,
-VoiceOver, AX, IME, and exact-window pixel gates. Do not replace this ordering
-with the historical phase text below when continuing work.
+The next product milestone is the shared control plane for features 2, 6, 11,
+and 14. Its foundation defines typed versioned preference requests and a
+stateless command registry; it does not yet claim a running-profile adapter,
+live SwiftUI preference projection, or external CLI transport. Continue with
+the registered Chromium preference, exact-profile authorization, restart
+persistence, audit transport, and live routing of Leader and split commands.
+Do not replace this ordering with the historical phase text below when
+continuing work.
 
 ## Fixed project context
 

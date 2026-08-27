@@ -1,0 +1,22 @@
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+source_set("command_registry") {
+  sources = [
+    "limitless_command_registry.cc",
+    "limitless_command_registry.h",
+  ]
+
+  public_deps = [ "//base" ]
+}
+
+source_set("command_registry_tests") {
+  testonly = true
+  sources = [ "../../tests/commands/limitless_command_registry_unittest.cc" ]
+
+  deps = [
+    ":command_registry",
+    "//testing/gtest",
+  ]
+}
