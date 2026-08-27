@@ -16,7 +16,14 @@ bool WriteAtomic(const base::FilePath& path, std::string_view value) {
   base::FilePath tmp = path.AddExtensionASCII("tmp");
   int fd = open(tmp.value().c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0) return false;
-  bool ok = write(fd, value.data(), value.size()) == static_cast<ssize_t>(value.size()) && fsync(fd) == 0;
+  size_t offset = 0;
+  while (offset < value.size()) {
+    ssize_t n = write(fd, value.data() + offset, value.size() - offset);
+    if (n > 0) offset += static_cast<size_t>(n);
+    else if (n < 0 && errno == EINTR) continue;
+    else break;
+  }
+  bool ok = offset == value.size() && fsync(fd) == 0;
   close(fd);
   if (!ok || rename(tmp.value().c_str(), path.value().c_str()) != 0) { unlink(tmp.value().c_str()); return false; }
   return true;
@@ -72,7 +79,7 @@ PreferenceControlTransportWorker::Prepare() {
   result.credential_path = inputs_.credential_path;
   if (cancellation_->cancelled.load(std::memory_order_acquire) ||
       (mkdir(inputs_.runtime_directory.value().c_str(), S_IRWXU) != 0 &&
-      errno != EEXIST)) { result.status = WorkerPrepareStatus::kRuntimeDirectory; return result; }
+      errno != EEXIST)) { result.status = cancellation_->cancelled.load() ? WorkerPrepareStatus::kCancelled : WorkerPrepareStatus::kRuntimeDirectory; return result; }
   struct stat st = {};
   if (lstat(inputs_.runtime_directory.value().c_str(), &st) != 0 ||
       !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
@@ -100,12 +107,22 @@ PreferenceControlTransportWorker::Prepare() {
   if (cancellation_->cancelled.load(std::memory_order_acquire) ||
       !WriteAtomic(inputs_.credential_path, inputs_.capability)) { result.status = WorkerPrepareStatus::kCredential; Cleanup(); return result; }
   owns_credential_ = true;
-  std::string descriptor = "{\"version\":1,\"profile_id\":\"" + inputs_.profile_id + "\",\"instance_id\":\"" + inputs_.instance_id + "\",\"socket_path\":\"" + inputs_.socket_path.value() + "\",\"credential_path\":\"" + inputs_.credential_path.value() + "\",\"pid\":" + std::to_string(base::GetCurrentProcId()) + "}";
+  base::DictValue descriptor_value;
+  descriptor_value.Set("version", 1);
+  descriptor_value.Set("profile_id", inputs_.profile_id);
+  descriptor_value.Set("instance_id", inputs_.instance_id);
+  descriptor_value.Set("socket_path", inputs_.socket_path.value());
+  descriptor_value.Set("credential_path", inputs_.credential_path.value());
+  descriptor_value.Set("pid", base::GetCurrentProcId());
+  std::string descriptor;
+  if (!base::JSONWriter::Write(descriptor_value, &descriptor)) {
+    result.status = WorkerPrepareStatus::kDescriptor; Cleanup(); return result;
+  }
   if (cancellation_->cancelled.load(std::memory_order_acquire) ||
       !WriteAtomic(inputs_.descriptor_path, descriptor)) { result.status = WorkerPrepareStatus::kDescriptor; Cleanup(); return result; }
   owns_descriptor_ = true;
   int pipe_fds[2];
-  if (pipe(pipe_fds) != 0) { Cleanup(); return result; }
+  if (pipe(pipe_fds) != 0) { result.status = WorkerPrepareStatus::kCancellationChannel; Cleanup(); return result; }
   cancellation_reader_.reset(pipe_fds[0]);
   flags = fcntl(pipe_fds[1], F_GETFD);
   status = fcntl(pipe_fds[1], F_GETFL);
@@ -119,8 +136,9 @@ PreferenceControlTransportWorker::Prepare() {
     close(pipe_fds[1]); Cleanup(); return result;
   }
   cancellation_->InstallWriter(pipe_fds[1]);
-  if (cancellation_->cancelled.load(std::memory_order_acquire)) { Cleanup(); return result; }
+  if (cancellation_->cancelled.load(std::memory_order_acquire)) { result.status = WorkerPrepareStatus::kCancelled; Cleanup(); return result; }
   published_ = true;
+  result.status = WorkerPrepareStatus::kSuccess;
   result.succeeded = true;
   return result;
 }
