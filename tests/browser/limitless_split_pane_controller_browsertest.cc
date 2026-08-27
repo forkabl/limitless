@@ -19,6 +19,7 @@
 #include "base/scoped_observation.h"
 #include "base/strings/strcat.h"
 #include "base/test/run_until.h"
+#include "base/uuid.h"
 #include "chrome/browser/tab_list/tab_list_interface.h"
 #include "chrome/browser/tab_list/tab_list_interface_observer.h"
 #include "chrome/browser/ui/browser.h"
@@ -32,6 +33,7 @@
 #include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/split_tabs/split_tab_id.h"
+#include "components/split_tabs/split_tab_visual_data.h"
 #include "components/tabs/public/split_tab_data.h"
 #include "components/tabs/public/tab_interface.h"
 #include "content/public/test/browser_test.h"
@@ -269,6 +271,127 @@ IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
   base::RunLoop().RunUntilIdle();
   EXPECT_FALSE(controller);
   EXPECT_EQ(nullptr, SplitPaneController::From(browser()));
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
+                       SplitInstanceIdentifierIsCanonicalAndStable) {
+  const tabs::TabHandle first = AddTab();
+  const tabs::TabHandle second = AddTab();
+  ASSERT_TRUE(TabListInterface::From(browser())->CreateSplit({first, second}));
+  auto controller =
+      std::make_unique<SplitPaneController>(browser(), base::DoNothing());
+  const SplitPaneWindowSnapshot first_snapshot = controller->GetSnapshot();
+  ASSERT_EQ(1u, first_snapshot.splits.size());
+  const std::string identifier =
+      first_snapshot.splits[0].split_instance_identifier;
+  const base::Uuid uuid = base::Uuid::ParseLowercase(identifier);
+  EXPECT_TRUE(uuid.is_valid());
+  EXPECT_EQ(identifier, uuid.AsLowercaseString());
+  const SplitPaneWindowSnapshot second_snapshot = controller->GetSnapshot();
+  ASSERT_EQ(1u, second_snapshot.splits.size());
+  EXPECT_EQ(identifier, second_snapshot.splits[0].split_instance_identifier);
+
+  const SplitPanePairTarget pair = OnlyPairTarget(*controller);
+  ASSERT_TRUE(
+      controller->SetLayout(pair, SplitPaneLayout::kStacked).succeeded());
+  const SplitPaneWindowSnapshot stacked = controller->GetSnapshot();
+  ASSERT_EQ(1u, stacked.splits.size());
+  EXPECT_EQ(identifier, stacked.splits[0].split_instance_identifier);
+  ASSERT_TRUE(controller->SetRatio(pair, 0.25).succeeded());
+  const SplitPaneWindowSnapshot ratio = controller->GetSnapshot();
+  ASSERT_EQ(1u, ratio.splits.size());
+  EXPECT_EQ(identifier, ratio.splits[0].split_instance_identifier);
+  ASSERT_TRUE(controller->Swap(pair).succeeded());
+  const SplitPaneWindowSnapshot swapped = controller->GetSnapshot();
+  ASSERT_EQ(1u, swapped.splits.size());
+  EXPECT_EQ(identifier, swapped.splits[0].split_instance_identifier);
+
+  const SplitPanePairTarget swapped_pair = OnlyPairTarget(*controller);
+  ASSERT_TRUE(controller->Unsplit(swapped_pair).succeeded());
+  ASSERT_TRUE(TabListInterface::From(browser())->CreateSplit({first, second}));
+  const SplitPaneWindowSnapshot recreated = controller->GetSnapshot();
+  ASSERT_EQ(1u, recreated.splits.size());
+  EXPECT_NE(identifier, recreated.splits[0].split_instance_identifier);
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
+                       ReusedNativeSplitIdGetsFreshProductIdentity) {
+  const tabs::TabHandle first = AddTab();
+  const tabs::TabHandle second = AddTab();
+  TabListInterface* tab_list = TabListInterface::From(browser());
+  ASSERT_TRUE(tab_list->CreateSplit({first, second}));
+  auto controller =
+      std::make_unique<SplitPaneController>(browser(), base::DoNothing());
+  const SplitPaneWindowSnapshot before = controller->GetSnapshot();
+  ASSERT_EQ(1u, before.splits.size());
+  const std::string old_identifier = before.splits[0].split_instance_identifier;
+  const split_tabs::SplitTabId native_id = first.Get()->GetSplit().value();
+  TabStripModel* model = browser()->GetTabStripModel();
+  ASSERT_TRUE(controller->Unsplit(OnlyPairTarget(*controller)).succeeded());
+  const int first_index = model->GetIndexOfTab(first.Get());
+  const int second_index = model->GetIndexOfTab(second.Get());
+  ASSERT_GE(first_index, 0);
+  ASSERT_GE(second_index, 0);
+  std::vector<int> indices = {first_index, second_index};
+  std::ranges::sort(indices);
+  model->RestoreSplit(native_id, indices, split_tabs::SplitTabVisualData());
+  const SplitPaneWindowSnapshot after = controller->GetSnapshot();
+  ASSERT_EQ(1u, after.splits.size());
+  EXPECT_NE(old_identifier, after.splits[0].split_instance_identifier);
+  const base::Uuid new_uuid =
+      base::Uuid::ParseLowercase(after.splits[0].split_instance_identifier);
+  EXPECT_TRUE(new_uuid.is_valid());
+  EXPECT_EQ(after.splits[0].split_instance_identifier,
+            new_uuid.AsLowercaseString());
+  EXPECT_EQ(native_id, first.Get()->GetSplit().value());
+  EXPECT_EQ(native_id, second.Get()->GetSplit().value());
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
+                       SplitInstanceIdentifierSurvivesWorkspaceRoundTrip) {
+  const tabs::TabHandle first = AddTab();
+  const tabs::TabHandle second = AddTab();
+  ASSERT_TRUE(TabListInterface::From(browser())->CreateSplit({first, second}));
+  auto controller =
+      std::make_unique<SplitPaneController>(browser(), base::DoNothing());
+  const SplitPaneWindowSnapshot before = controller->GetSnapshot();
+  ASSERT_EQ(1u, before.splits.size());
+  const std::string identifier = before.splits[0].split_instance_identifier;
+  const std::string workspace =
+      *workspace_controller_->GetSnapshot().active_workspace_identifier;
+  const WorkspaceOperationResult other =
+      workspace_controller_->CreateWorkspace(u"Other");
+  ASSERT_TRUE(other.succeeded());
+  const SplitPaneWindowSnapshot away = controller->GetSnapshot();
+  EXPECT_TRUE(away.splits.empty());
+  ASSERT_TRUE(workspace_controller_->SwitchWorkspace(workspace).succeeded());
+  const SplitPaneWindowSnapshot after = controller->GetSnapshot();
+  ASSERT_EQ(1u, after.splits.size());
+  EXPECT_EQ(identifier, after.splits[0].split_instance_identifier);
+}
+
+IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,
+                       MemberReplacementRegeneratesProductIdentity) {
+  const tabs::TabHandle first = AddTab();
+  const tabs::TabHandle second = AddTab();
+  const tabs::TabHandle third = AddTab();
+  TabListInterface* tab_list = TabListInterface::From(browser());
+  ASSERT_TRUE(tab_list->CreateSplit({first, second}));
+  auto controller =
+      std::make_unique<SplitPaneController>(browser(), base::DoNothing());
+  const SplitPaneWindowSnapshot before = controller->GetSnapshot();
+  ASSERT_EQ(1u, before.splits.size());
+  const std::string identifier = before.splits[0].split_instance_identifier;
+  const split_tabs::SplitTabId native_id = first.Get()->GetSplit().value();
+  TabStripModel* model = browser()->GetTabStripModel();
+  model->ActivateTabAt(model->GetIndexOfTab(second.Get()));
+  model->UpdateTabInSplit(first.Get(), model->GetIndexOfTab(third.Get()),
+                          TabStripModel::SplitUpdateType::kSwap);
+  const SplitPaneWindowSnapshot after = controller->GetSnapshot();
+  ASSERT_EQ(1u, after.splits.size());
+  EXPECT_NE(identifier, after.splits[0].split_instance_identifier);
+  EXPECT_EQ(native_id, second.Get()->GetSplit().value());
+  EXPECT_EQ(native_id, third.Get()->GetSplit().value());
 }
 
 IN_PROC_BROWSER_TEST_F(LimitlessSplitPaneControllerBrowserTest,

@@ -171,13 +171,6 @@ class SplitPaneController final : public TabStripModelObserver {
   void ScheduleReconcile();
   void ReconcileAndPublish(uint64_t generation);
 
-  bool stopped_ = false;
-  bool reconcile_scheduled_ = false;
-  bool reconciling_ = false;
-  bool reconcile_requested_ = false;
-  uint64_t reconcile_generation_ = 0;
-  // Ephemeral identity for each live Chromium split.  This survives visual
-  // changes and is discarded when the controller stops or the split vanishes.
   struct SplitInstanceEntry {
     std::string identifier;
     std::pair<int32_t, int32_t> canonical_members;
@@ -185,6 +178,14 @@ class SplitPaneController final : public TabStripModelObserver {
   std::string GetOrCreateSplitInstanceIdentifier(
       split_tabs::SplitTabId split_id,
       std::pair<int32_t, int32_t> canonical_members) const;
+
+  bool stopped_ = false;
+  bool reconcile_scheduled_ = false;
+  bool reconciling_ = false;
+  bool reconcile_requested_ = false;
+  uint64_t reconcile_generation_ = 0;
+  // Ephemeral identity for each live Chromium split. This survives visual
+  // changes and is discarded when the controller stops or the split vanishes.
   mutable std::map<split_tabs::SplitTabId, SplitInstanceEntry>
       split_instance_identifiers_;
   raw_ptr<BrowserWindowInterface> browser_window_;

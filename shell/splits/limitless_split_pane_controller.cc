@@ -569,6 +569,9 @@ void SplitPaneController::OnTabStripEditabilityChanged(
 
 void SplitPaneController::OnSplitTabChanged(const SplitTabChange& change) {
   if (change.model == tab_strip_model_) {
+    if (change.type == SplitTabChange::Type::kRemoved) {
+      split_instance_identifiers_.erase(change.split_id);
+    }
     ScheduleReconcile();
   }
 }
