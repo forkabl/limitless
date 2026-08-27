@@ -253,6 +253,7 @@ PreferenceControlTransportStartStatus PreferenceControlTransport::Start() {
   }
 
   stopping_.store(false, std::memory_order_release);
+  listen_descriptor_.store(listen_fd_.get(), std::memory_order_release);
   running_ = true;
   io_thread_.task_runner()->PostTask(
       FROM_HERE,
@@ -267,11 +268,30 @@ void PreferenceControlTransport::Stop() {
   }
   weak_factory_.InvalidateWeakPtrs();
   stopping_.store(true, std::memory_order_release);
-  if (listen_fd_.is_valid()) {
-    shutdown(listen_fd_.get(), SHUT_RDWR);
-    listen_fd_.reset();
+  const int listen_descriptor =
+      listen_descriptor_.load(std::memory_order_acquire);
+  if (listen_descriptor >= 0) {
+    shutdown(listen_descriptor, SHUT_RDWR);
+  }
+  {
+    std::lock_guard lock(accepted_connection_mutex_);
+    if (accepted_connection_descriptor_ >= 0) {
+      shutdown(accepted_connection_descriptor_, SHUT_RDWR);
+    }
+  }
+  {
+    std::lock_guard lock(pending_response_mutex_);
+    if (auto pending = pending_response_.lock()) {
+      {
+        std::lock_guard pending_lock(pending->mutex);
+        pending->cancelled = true;
+      }
+      pending->ready.notify_one();
+    }
   }
   io_thread_.Stop();
+  listen_descriptor_.store(-1, std::memory_order_release);
+  listen_fd_.reset();
   base::DeleteFile(descriptor_path_);
   base::DeleteFile(credential_path_);
   base::DeleteFile(socket_path_);
