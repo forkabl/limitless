@@ -1,6 +1,8 @@
 #ifndef LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_TRANSPORT_WORKER_H_
 #define LIMITLESS_SHELL_CONTROL_PLANE_LIMITLESS_PREFERENCE_CONTROL_TRANSPORT_WORKER_H_
 
+#include <sys/types.h>
+
 #include <atomic>
 #include <memory>
 #include <string>
@@ -9,8 +11,8 @@
 #include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
 #include "base/memory/ref_counted.h"
-#include "base/synchronization/lock.h"
 #include "base/sequence_checker.h"
+#include "base/synchronization/lock.h"
 
 namespace limitless {
 
@@ -23,6 +25,7 @@ struct TransportCancellationState
   std::atomic<bool> cancelled{false};
   base::Lock lock;
   base::ScopedFD writer_fd;
+
  private:
   friend class base::RefCountedThreadSafe<TransportCancellationState>;
   ~TransportCancellationState();
@@ -40,9 +43,16 @@ class PreferenceControlTransportWorker {
     std::string capability;
     bool force_post_bind_failure = false;
   };
-  enum class WorkerPrepareStatus { kSuccess, kCancelled, kRuntimeDirectory,
-                                   kCollision, kSocket, kCredential, kDescriptor,
-                                   kCancellationChannel };
+  enum class WorkerPrepareStatus {
+    kSuccess,
+    kCancelled,
+    kRuntimeDirectory,
+    kCollision,
+    kSocket,
+    kCredential,
+    kDescriptor,
+    kCancellationChannel
+  };
   struct PrepareResult {
     bool succeeded = false;
     WorkerPrepareStatus status = WorkerPrepareStatus::kRuntimeDirectory;
@@ -51,8 +61,9 @@ class PreferenceControlTransportWorker {
     base::FilePath credential_path;
   };
 
-  PreferenceControlTransportWorker(Inputs inputs,
-                                   scoped_refptr<TransportCancellationState> cancellation);
+  PreferenceControlTransportWorker(
+      Inputs inputs,
+      scoped_refptr<TransportCancellationState> cancellation);
   ~PreferenceControlTransportWorker();
   PrepareResult Prepare();
   void Run();
@@ -63,11 +74,16 @@ class PreferenceControlTransportWorker {
   Inputs inputs_;
   scoped_refptr<TransportCancellationState> cancellation_;
   base::ScopedFD listener_;
+  base::ScopedFD runtime_directory_fd_;
   base::ScopedFD cancellation_reader_;
   bool published_ = false;
   bool owns_socket_ = false;
   bool owns_credential_ = false;
   bool owns_descriptor_ = false;
+  struct ArtifactIdentity {
+    dev_t dev = 0;
+    ino_t ino = 0;
+  } socket_identity_, credential_identity_, descriptor_identity_;
 };
 
 }  // namespace limitless

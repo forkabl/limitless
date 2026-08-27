@@ -41,7 +41,7 @@ bool WriteAtomic(const base::FilePath& path, std::string_view value) {
   }
   bool ok = offset == value.size() && fsync(fd) == 0;
   close(fd);
-  if (!ok || rename(tmp.value().c_str(), path.value().c_str()) != 0) {
+  if (!ok || link(tmp.value().c_str(), path.value().c_str()) != 0) {
     unlink(tmp.value().c_str());
     return false;
   }
@@ -119,6 +119,16 @@ PreferenceControlTransportWorker::Prepare() {
   if (lstat(inputs_.runtime_directory.value().c_str(), &st) != 0 ||
       !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
       chmod(inputs_.runtime_directory.value().c_str(), S_IRWXU) != 0) {
+    result.status = WorkerPrepareStatus::kRuntimeDirectory;
+    return result;
+  }
+  runtime_directory_fd_.reset(
+      open(inputs_.runtime_directory.value().c_str(),
+           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+  struct stat runtime_check = {};
+  if (!runtime_directory_fd_.is_valid() ||
+      fstat(runtime_directory_fd_.get(), &runtime_check) != 0 ||
+      !S_ISDIR(runtime_check.st_mode)) {
     result.status = WorkerPrepareStatus::kRuntimeDirectory;
     return result;
   }
