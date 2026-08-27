@@ -386,7 +386,7 @@ class SwiftUITabRailHost final : public views::NativeViewHost,
         }];
     Profile* profile = browser_window_->GetProfile();
     if (!profile->IsOffTheRecord() && profile->GetPrefs() &&
-        profile->GetPrefs()->FindPreference(kRailDensityPreference)) {
+        profile->GetPrefs()->FindPreference(kRailDensityPref)) {
       preference_backend_ =
           std::make_unique<ProfilePreferenceControlBackend>(
               profile,
