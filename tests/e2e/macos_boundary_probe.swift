@@ -161,13 +161,13 @@ private func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTyp
 }
 
 private func elements(from value: CFTypeRef?) -> [AXUIElement] {
-  guard let value, CFGetTypeID(value) == CFArrayGetTypeID() else {
-    return []
-  }
+  guard let value, CFGetTypeID(value) == CFArrayGetTypeID() else { return [] }
   let array = value as! CFArray
-  return (0..<CFArrayGetCount(array)).map { index in
-    let rawElement = CFArrayGetValueAtIndex(array, index)!
-    return Unmanaged<AXUIElement>.fromOpaque(rawElement).takeUnretainedValue()
+  let values = array as NSArray
+  return values.compactMap { item -> AXUIElement? in
+    guard let item = item as CFTypeRef?,
+          CFGetTypeID(item) == AXUIElementGetTypeID() else { return nil }
+    return (item as! AXUIElement)
   }
 }
 
@@ -175,8 +175,7 @@ private func axElement(from value: CFTypeRef?) -> AXUIElement? {
   guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else {
     return nil
   }
-  let opaque = Unmanaged.passUnretained(value).toOpaque()
-  return Unmanaged<AXUIElement>.fromOpaque(opaque).takeUnretainedValue()
+  return (value as! AXUIElement)
 }
 
 private func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
