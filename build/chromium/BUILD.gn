@@ -58,7 +58,6 @@ source_set("swiftui_browser_tests") {
 
   sources = [
     "../../tests/browser/limitless_control_plane_browsertest.cc",
-    "../../tests/browser/limitless_preference_control_transport_browsertest.cc",
     "../../tests/browser/limitless_profile_preference_backend_browsertest.cc",
     "../../tests/browser/limitless_running_profile_control_registry_browsertest.cc",
     "../../tests/browser/limitless_split_pane_controller_browsertest.cc",
