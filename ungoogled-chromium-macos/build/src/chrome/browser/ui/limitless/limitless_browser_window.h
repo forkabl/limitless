@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
 #include "chrome/browser/ui/find_bar/find_bar.h"
@@ -111,7 +112,7 @@ class LimitlessLocationBar : public LocationBar {
   LocationBarTesting* GetLocationBarForTesting() override;
 
  private:
-  Browser* browser_;  // Weak; the Browser owns the window.
+  raw_ptr<Browser> browser_;  // Weak; the Browser owns the window.
 };
 
 // Fullscreen / exclusive-access context for the Limitless window. Every mouse and
@@ -143,8 +144,8 @@ class LimitlessExclusiveAccessContext : public ExclusiveAccessContext {
       ExclusiveAccessBubbleHideCallback first_hide_callback = {});
   void HideFullscreenDisclosure(ExclusiveAccessBubbleHideReason reason);
 
-  Browser* browser_;
-  void* fullscreen_disclosure_ = nullptr;
+  raw_ptr<Browser> browser_;
+  raw_ptr<void> fullscreen_disclosure_ = nullptr;
   ExclusiveAccessBubbleHideCallback fullscreen_disclosure_hide_callback_;
   bool exclusive_access_bubble_visible_ = false;
 };
@@ -154,7 +155,7 @@ class LimitlessExclusiveAccessContext : public ExclusiveAccessContext {
 // what makes Chrome's real dialog widgets work without a BrowserView.
 class LimitlessModalDialogHost : public web_modal::WebContentsModalDialogHost {
  public:
-  LimitlessModalDialogHost() = default;
+  LimitlessModalDialogHost();
   ~LimitlessModalDialogHost() override;
 
   gfx::NativeView GetHostView() const override;
@@ -296,7 +297,7 @@ class LimitlessBrowserWindow : public BrowserWindow {
   void DeleteBrowserWindow() override;
 
  private:
-  Browser* browser_;  // Weak; the Browser owns this window.
+  raw_ptr<Browser> browser_;  // Weak; the Browser owns this window.
   LimitlessModalDialogHost modal_dialog_host_;
   LimitlessExclusiveAccessContext exclusive_access_context_;
   LimitlessLocationBar location_bar_;

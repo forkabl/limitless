@@ -74,7 +74,22 @@ diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
 index 18417167ff..f2386f980a 100644
 --- a/chrome/BUILD.gn
 +++ b/chrome/BUILD.gn
-@@ -647,6 +647,38 @@ if (is_win) {
+@@ -473,6 +473,14 @@ if (is_win) {
+     objdump_path = rebase_path("$clang_base_path/bin/", root_build_dir)
+   }
+ 
++  config("limitless_macos_link_target") {
++    ldflags = [
++      "-mmacos-version-min=$mac_min_system_version",
++      "-Wl,--ignore-auto-link-option=CoreAudioTypes",
++    ]
++    lib_dirs = [ "$mac_sdk_path/usr/lib/swift" ]
++  }
++
+   group("chrome") {
+     deps = [ ":chrome_app" ]
+ 
+@@ -647,6 +655,38 @@ if (is_win) {
      outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
    }
  
@@ -113,7 +128,7 @@ index 18417167ff..f2386f980a 100644
    bundle_data("chrome_resources") {
      sources = [
        "$root_out_dir/$chrome_mac_bundle_id.manifest",
-@@ -657,6 +689,7 @@ if (is_win) {
+@@ -657,6 +697,7 @@ if (is_win) {
        ":chrome_app_icon",
        ":chrome_app_strings",
        ":chrome_asset_catalog",
@@ -121,6 +136,35 @@ index 18417167ff..f2386f980a 100644
        "//components/policy:chrome_manifest_bundle",
      ]
    }
+@@ -1169,6 +1210,7 @@ if (is_win) {
+     ldflags = [ "-ObjC" ]
+ 
+     configs += [
+       ":chrome_dll_symbol_order",
++      ":limitless_macos_link_target",
+       "//build/config/compiler:wexit_time_destructors",
+     ]
+@@ -1190,8 +1232,11 @@ if (is_win) {
+     if (is_chrome_branded) {
+       framework_contents += [ "Default Apps" ]
+     }
+ 
+-    configs += [ "//build/config/compiler:wexit_time_destructors" ]
++    configs += [
++      ":limitless_macos_link_target",
++      "//build/config/compiler:wexit_time_destructors",
++    ]
+     configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
+     configs += [ "//build/config/compiler:thinlto_optimize_max" ]
+ 
+@@ -1201,6 +1246,7 @@ if (is_win) {
+       "CHROMIUM_SHORT_NAME=$chrome_product_short_name",
+     ]
+ 
+     public_deps = [ ":chrome_dll" ]
++    public_configs = [ ":limitless_macos_link_target" ]
+ 
+     bundle_deps = [
 diff --git a/chrome/app/theme/chromium/BRANDING b/chrome/app/theme/chromium/BRANDING
 index f8363d5b29..0a946befac 100644
 --- a/chrome/app/theme/chromium/BRANDING
@@ -284,13 +328,15 @@ index 7a0111c300..b8805e5bd1 100644
  #if defined(USE_AURA)
  #include "ui/aura/client/aura_constants.h"
  #include "ui/aura/window.h"
-@@ -33,6 +37,11 @@ std::unique_ptr<BrowserWindow, BrowserWindowDeleter>
+@@ -33,6 +37,13 @@ std::unique_ptr<BrowserWindow, BrowserWindowDeleter>
  BrowserWindow::CreateBrowserWindow(Browser* browser,
                                     bool user_gesture,
                                     bool in_tab_dragging) {
 +#if BUILDFLAG(IS_MAC)
-+  return std::unique_ptr<BrowserWindow, BrowserWindowDeleter>(
-+      new LimitlessBrowserWindow(browser));
++  if (browser->is_type_normal()) {
++    return std::unique_ptr<BrowserWindow, BrowserWindowDeleter>(
++        new LimitlessBrowserWindow(browser));
++  }
 +#endif
 +
    if (webui_browser::IsWebUIBrowserEnabled() && browser->is_type_normal()) {
@@ -308,14 +354,43 @@ index a614311803..04c8f10e2f 100644
  #include "chrome/browser/ui/views/permissions/permission_prompt_notifications_mac.h"
  #include "chrome/browser/web_applications/os_integration/mac/web_app_shortcut_mac.h"
  #endif
-@@ -255,6 +256,10 @@ std::unique_ptr<permissions::PermissionPrompt> CreateQuietPrompt(
+@@ -255,6 +256,13 @@ std::unique_ptr<permissions::PermissionPrompt> CreateQuietPrompt(
  std::unique_ptr<permissions::PermissionPrompt> CreatePermissionPrompt(
      content::WebContents* web_contents,
      permissions::PermissionPrompt::Delegate* delegate) {
 +#if BUILDFLAG(IS_MAC)
-+  return limitless::CreateLimitlessPermissionPrompt(web_contents, delegate);
++  if (auto prompt =
++          limitless::CreateLimitlessPermissionPrompt(web_contents, delegate)) {
++    return prompt;
++  }
 +#endif
 +
    BrowserWindowInterface* browser_window_interface =
        GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
    if (!browser_window_interface) {
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+index 0f6b2d9113..3a472d630d 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -1000,7 +1000,9 @@ void NewTabPageHandler::UpdateFooterVisibility() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  if (!footer_controller) {
++    return;
++  }
+   OnFooterVisibilityUpdated(footer_controller->GetFooterVisible(web_contents_));
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }
+@@ -1363,7 +1365,9 @@ void NewTabPageHandler::OnBrowserWindowInterfaceChanged() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  if (!footer_controller) {
++    return;
++  }
+   footer_controller_observation_.Observe(footer_controller);
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }

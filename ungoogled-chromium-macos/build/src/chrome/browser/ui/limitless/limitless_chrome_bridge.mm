@@ -17,6 +17,7 @@
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/no_destructor.h"
 #include "base/scoped_observation.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
@@ -120,15 +121,17 @@ int g_next_browser_identifier = 1;
 BOOL g_limitless_auto_pip = YES;
 
 std::map<content::WebContents*, __weak LimitlessBrowserView*>& ViewMap() {
-  static std::map<content::WebContents*, __weak LimitlessBrowserView*> map;
-  return map;
+  using Map = std::map<content::WebContents*, __weak LimitlessBrowserView*>;
+  static base::NoDestructor<Map> map;
+  return *map;
 }
 
 // Tabs created by the engine (window.open, chrome.tabs.create) waiting for a
 // LimitlessBrowserView to adopt them, keyed by their URL spec.
 std::multimap<std::string, content::WebContents*>& OrphanMap() {
-  static std::multimap<std::string, content::WebContents*> map;
-  return map;
+  using Map = std::multimap<std::string, content::WebContents*>;
+  static base::NoDestructor<Map> map;
+  return *map;
 }
 
 void EraseOrphanEntriesForContents(content::WebContents* contents);
@@ -148,10 +151,11 @@ class LimitlessOrphanWebContentsObserver : public content::WebContentsObserver {
 
 std::map<content::WebContents*, std::unique_ptr<LimitlessOrphanWebContentsObserver>>&
 OrphanObservers() {
-  static std::map<content::WebContents*,
-                  std::unique_ptr<LimitlessOrphanWebContentsObserver>>
-      observers;
-  return observers;
+  using Map =
+      std::map<content::WebContents*,
+               std::unique_ptr<LimitlessOrphanWebContentsObserver>>;
+  static base::NoDestructor<Map> observers;
+  return *observers;
 }
 
 void EraseOrphanEntriesForContents(content::WebContents* contents) {
@@ -988,7 +992,7 @@ Browser* LimitlessBrowser() {
 // LimitlessBrowserView
 
 @implementation LimitlessBrowserView {
-  content::WebContents* _webContents;  // Owned by the TabStripModel.
+  raw_ptr<content::WebContents> _webContents;  // Owned by the TabStripModel.
   std::unique_ptr<limitless::TabBridge> _bridge;
   NSString* _pendingURL;
   NSView* __strong _webView;

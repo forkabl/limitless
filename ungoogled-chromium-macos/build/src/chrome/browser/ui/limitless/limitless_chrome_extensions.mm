@@ -588,7 +588,7 @@ NSString* InstallTypeString(const extensions::Extension& extension) {
 
   NSMutableArray<NSDictionary*>* result = [NSMutableArray array];
   struct Entry {
-    const extensions::Extension* extension;
+    raw_ptr<const extensions::Extension> extension;
     bool enabled;
   };
   std::map<std::string, Entry> by_id;

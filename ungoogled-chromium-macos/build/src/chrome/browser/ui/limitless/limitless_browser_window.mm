@@ -457,7 +457,7 @@ bool LimitlessExclusiveAccessContext::IsExclusiveAccessBubbleDisplayed() const {
 }
 
 void LimitlessExclusiveAccessContext::OnExclusiveAccessUserInput() {
-  NSPanel* panel = (__bridge NSPanel*)fullscreen_disclosure_;
+  NSPanel* panel = (__bridge NSPanel*)fullscreen_disclosure_.get();
   if (panel) {
     [panel orderFront:nil];
   }
@@ -557,7 +557,8 @@ void LimitlessExclusiveAccessContext::ShowFullscreenDisclosure(
 
 void LimitlessExclusiveAccessContext::HideFullscreenDisclosure(
     ExclusiveAccessBubbleHideReason reason) {
-  NSPanel* panel = (__bridge_transfer NSPanel*)fullscreen_disclosure_;
+  NSPanel* panel =
+      (__bridge_transfer NSPanel*)fullscreen_disclosure_.get();
   fullscreen_disclosure_ = nullptr;
   exclusive_access_bubble_visible_ = false;
 
@@ -577,6 +578,8 @@ LimitlessBrowserWindow::~LimitlessBrowserWindow() {
 }
 
 // --- LimitlessModalDialogHost ----------------------------------------------------
+
+LimitlessModalDialogHost::LimitlessModalDialogHost() = default;
 
 LimitlessModalDialogHost::~LimitlessModalDialogHost() {
   for (auto& observer : observers_) {
