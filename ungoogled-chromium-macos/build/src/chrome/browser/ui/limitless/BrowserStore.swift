@@ -116,6 +116,9 @@ final class BrowserStore: ObservableObject {
     /// Shared, persisted user preferences.
     let settings = BrowserSettings.shared
 
+    /// Coordinates geometry-changing chrome with the embedded Chromium views.
+    let chromeTransitions = ChromeTransitionDriver.shared
+
     /// Drives the sidebar media player from injected-agent broadcasts.
     let media = MediaController()
 
@@ -606,13 +609,24 @@ final class BrowserStore: ObservableObject {
               let target = tab(for: id), target.kind == .web else {
             return
         }
-        splitSide = side
-        splitTabID = id
         target.realize()
+        chromeTransitions.perform(kind: .splitView,
+                                  anchor: .center,
+                                  animation: Motion.reveal,
+                                  fallbackDuration: 0.25) {
+            splitSide = side
+            splitTabID = id
+        }
     }
 
     func closeSplit() {
-        splitTabID = nil
+        guard splitTabID != nil else { return }
+        chromeTransitions.perform(kind: .splitView,
+                                  anchor: .center,
+                                  animation: Motion.reveal,
+                                  fallbackDuration: 0.25) {
+            splitTabID = nil
+        }
     }
 
     /// Select a tab. `focusWebView` is false for keyboard sidebar navigation, so
@@ -650,6 +664,7 @@ final class BrowserStore: ObservableObject {
         launcherEditsCurrentTab = false
         launcherFocusRequest += 1
         withAnimation(Motion.reveal) { launcherVisible = true }
+        chromeTransitions.scheduleViewUpdates()
     }
 
     /// Address-bar behavior: open the launcher seeded with the current tab's URL
@@ -664,6 +679,7 @@ final class BrowserStore: ObservableObject {
         launcherFocusRequest += 1
         if !launcherVisible {
             withAnimation(Motion.reveal) { launcherVisible = true }
+            chromeTransitions.scheduleViewUpdates()
         }
     }
 
@@ -679,6 +695,7 @@ final class BrowserStore: ObservableObject {
     func dismissLauncher() {
         launcherEditsCurrentTab = false
         withAnimation(Motion.reveal) { launcherVisible = false }
+        chromeTransitions.scheduleViewUpdates()
     }
 
     /// Commit typed launcher text. In address-bar mode this loads into the
@@ -1237,23 +1254,41 @@ final class BrowserStore: ObservableObject {
     }
 
     func toggleSidebar() {
-        withAnimation(Motion.snappy) { sidebarVisible.toggle() }
+        let anchor: ChromeTransitionAnchor = settings.sidebarPosition == .left
+            ? .trailing : .leading
+        chromeTransitions.perform(kind: .sidebar,
+                                  anchor: anchor,
+                                  animation: Motion.snappy,
+                                  fallbackDuration: 0.15) {
+            sidebarVisible.toggle()
+        }
+    }
+
+    func setSidebarPosition(_ position: SidebarPosition) {
+        guard settings.sidebarPosition != position else { return }
+        chromeTransitions.perform(kind: .sidebarPosition,
+                                  anchor: .center,
+                                  animation: Motion.snappy,
+                                  fallbackDuration: 0.15) {
+            settings.sidebarPosition = position
+        }
     }
 
     func openAIPanel() {
         guard prepareAIPanelOpen() else { return }
-        withAnimation(Motion.reveal) { aiPanelVisible = true }
+        guard !aiPanelVisible else { return }
+        transitionAIPanel { aiPanelVisible = true }
     }
 
     func toggleAIPanel() {
         guard prepareAIPanelOpen() else { return }
-        withAnimation(Motion.reveal) { aiPanelVisible.toggle() }
+        transitionAIPanel { aiPanelVisible.toggle() }
     }
 
     /// Close the AI side panel (Esc / explicit dismiss). Mirrors closePeek().
     func closeAIPanel() {
         guard aiPanelVisible else { return }
-        withAnimation(Motion.reveal) { aiPanelVisible = false }
+        transitionAIPanel { aiPanelVisible = false }
     }
 
     private func prepareAIPanelOpen() -> Bool {
@@ -1266,13 +1301,23 @@ final class BrowserStore: ObservableObject {
 
     private func closeAIPanelForDisabledIntegration(showToast: Bool) {
         if aiPanelVisible {
-            withAnimation(Motion.reveal) { aiPanelVisible = false }
+            transitionAIPanel { aiPanelVisible = false }
         } else {
             aiPanelVisible = false
         }
         if showToast {
             ToastCenter.shared.show("AI integration is off", icon: "sparkles", style: .warning)
         }
+    }
+
+    private func transitionAIPanel(changes: () -> Void) {
+        let anchor: ChromeTransitionAnchor = settings.sidebarPosition == .left
+            ? .leading : .trailing
+        chromeTransitions.perform(kind: .aiPanel,
+                                  anchor: anchor,
+                                  animation: Motion.reveal,
+                                  fallbackDuration: 0.25,
+                                  changes: changes)
     }
 
     func toggleSettings() {
@@ -1289,7 +1334,9 @@ final class BrowserStore: ObservableObject {
         for tab in tabs {
             tab.agent?.shutdown()
         }
-        for tab in tabs { tab.close() }
+        // Chromium owns the realized WebContents and closes the tab strip as
+        // part of BrowserWindow::Close. Closing the same views here races its
+        // renderer beforeunload callbacks against Browser destruction.
     }
 
     /// Clear browsing data: history (and optionally cookies / cache). Cookies and

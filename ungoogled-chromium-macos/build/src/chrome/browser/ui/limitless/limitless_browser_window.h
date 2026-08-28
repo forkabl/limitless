@@ -297,6 +297,7 @@ class LimitlessBrowserWindow : public BrowserWindow {
   void DeleteBrowserWindow() override;
 
  private:
+  bool features_torn_down_ = false;
   raw_ptr<Browser> browser_;  // Weak; the Browser owns this window.
   LimitlessModalDialogHost modal_dialog_host_;
   LimitlessExclusiveAccessContext exclusive_access_context_;

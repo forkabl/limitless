@@ -245,7 +245,7 @@ private struct SidebarContextMenu: View {
         Menu("Sidebar Side") {
             ForEach(SidebarPosition.allCases) { position in
                 Button(position.label) {
-                    settings.sidebarPosition = position
+                    store.setSidebarPosition(position)
                 }
             }
         }

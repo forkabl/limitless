@@ -203,7 +203,7 @@ index b669d4f3ee..5f472693de 100644
  import("//chrome/browser/buildflags.gni")
  import("//chrome/common/features.gni")
  import("//components/captive_portal/core/features.gni")
-@@ -69,6 +72,90 @@ source_set("web_app_testing_flags") {
+@@ -69,6 +72,94 @@ source_set("web_app_testing_flags") {
    ]
  }
  
@@ -225,6 +225,7 @@ index b669d4f3ee..5f472693de 100644
 +      "limitless/BrowserStore+DragDrop.swift",
 +      "limitless/BrowserStore.swift",
 +      "limitless/BrowserTab.swift",
++      "limitless/ChromeTransitionDriver.swift",
 +      "limitless/CodexAppServerClient.swift",
 +      "limitless/Components.swift",
 +      "limitless/ContextMenu.swift",
@@ -274,6 +275,7 @@ index b669d4f3ee..5f472693de 100644
 +      "limitless/ToastCenter.swift",
 +      "limitless/ToastOverlay.swift",
 +      "limitless/Toolbar.swift",
++      "limitless/WebContentsResizeCoordinator.swift",
 +      "limitless/WebContainerView.swift",
 +    ]
 +    frameworks = [
@@ -284,6 +286,8 @@ index b669d4f3ee..5f472693de 100644
 +      "CryptoKit.framework",
 +      "Foundation.framework",
 +      "LocalAuthentication.framework",
++      "QuartzCore.framework",
++      "ScreenCaptureKit.framework",
 +      "Security.framework",
 +      "SwiftUI.framework",
 +      "UniformTypeIdentifiers.framework",
@@ -294,7 +298,7 @@ index b669d4f3ee..5f472693de 100644
  # Use a static library here because many test binaries depend on this but don't
  # require many files from it. This makes linking more efficient.
  # TODO(https://crbug.com/353332589): Once //chrome/browser is properly
-@@ -3231,6 +3318,10 @@ static_library("ui") {
+@@ -3231,6 +3322,10 @@ static_library("ui") {
        "browser_mac.h",
        "fullscreen_util_mac.cc",
        "fullscreen_util_mac.h",
@@ -305,7 +309,7 @@ index b669d4f3ee..5f472693de 100644
        "views/apps/chrome_app_window_client_views_mac.mm",
        "views/certificate_viewer_mac_views.mm",
        "views/frame/browser_frame_view_factory_mac.mm",
-@@ -3259,6 +3350,7 @@ static_library("ui") {
+@@ -3259,6 +3354,7 @@ static_library("ui") {
      ]
  
      deps += [
@@ -313,6 +317,42 @@ index b669d4f3ee..5f472693de 100644
        "//chrome/browser:app_controller_mac",
        "//chrome/browser:chrome_browser_application_mac",
        "//chrome/browser:global_keyboard_shortcuts_mac",
+diff --git a/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc b/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
+index 3bbc1e25ac..effe27a727 100644
+--- a/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
++++ b/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
+@@ -9,7 +9,6 @@
+ #include <memory>
+ #include <optional>
+ 
+-#include "base/check_is_test.h"
+ #include "base/functional/bind.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/time/time.h"
+@@ -37,7 +36,6 @@
+ #include "chrome/browser/ui/views/side_panel/side_panel_web_ui_view.h"
+ #include "chrome/browser/ui/webui/side_panel/read_anything/read_anything_untrusted_page_handler.h"
+ #include "chrome/browser/ui/webui/side_panel/read_anything/read_anything_untrusted_ui.h"
+-#include "chrome/browser/ui/webui_browser/webui_browser.h"
+ #include "components/accessibility/reading/distillable_pages.h"
+ #include "components/feature_engagement/public/feature_constants.h"
+ #include "components/language/core/browser/language_model.h"
+@@ -351,12 +349,9 @@ void ReadAnythingSidePanelController::TabWillDetach(
+   // not create a SidePanelCoordinator. This block will be unnecessary once that
+   // changes.
+   if (!side_panel_ui) {
+-    // TODO(webium): create a SidePanelCoordinator for WebUIBrowser.
+-    // This is a temporary solution to avoid a crash.
+-    if (!webui_browser::IsWebUIBrowserEnabled()) {
+-      CHECK_IS_TEST();
+-    }
+-    return;  // IN-TEST
++    // Browser shells without Chromium's SidePanelCoordinator have no side
++    // panel entry to close during tab teardown.
++    return;
+   }
+ 
+   SidePanelEntry::Key read_anything_key(SidePanelEntry::Id::kReadAnything);
 diff --git a/chrome/browser/ui/views/frame/browser_window_factory.cc b/chrome/browser/ui/views/frame/browser_window_factory.cc
 index 7a0111c300..b8805e5bd1 100644
 --- a/chrome/browser/ui/views/frame/browser_window_factory.cc

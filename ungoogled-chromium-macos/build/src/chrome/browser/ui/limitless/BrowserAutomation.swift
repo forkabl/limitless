@@ -658,7 +658,7 @@ enum BrowserAutomation {
             guard let value = SidebarPosition(rawValue: raw) else {
                 throw BrowserAutomationError.unsupportedAction("Unknown sidebarPosition: \(raw)")
             }
-            settings.sidebarPosition = value
+            store.setSidebarPosition(value)
             changes.append("sidebar position → \(value.rawValue)")
         }
         if let value = bool(arguments["autoPiP"]) {

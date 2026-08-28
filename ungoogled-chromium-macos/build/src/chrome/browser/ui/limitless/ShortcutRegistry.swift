@@ -298,6 +298,11 @@ enum LimitlessCommands {
         return handle(trigger, eventIdentity: eventIdentity, store: store)
     }
 
+    static func canHandle(_ event: NSEvent, store: BrowserStore) -> Bool {
+        guard event.type == .keyDown else { return false }
+        return canHandle(LimitlessShortcutTrigger(event: event), store: store)
+    }
+
     static func handle(keyCode: UInt16,
                        charactersIgnoringModifiers: String?,
                        modifierMask: UInt,
@@ -309,6 +314,20 @@ enum LimitlessCommands {
             modifierMask: modifierMask,
             isRepeat: isRepeat)
         return handle(trigger, eventIdentity: nil, store: store)
+    }
+
+    static func canHandle(keyCode: UInt16,
+                          charactersIgnoringModifiers: String?,
+                          modifierMask: UInt,
+                          isRepeat: Bool,
+                          store: BrowserStore) -> Bool {
+        canHandle(
+            LimitlessShortcutTrigger(
+                keyCode: keyCode,
+                charactersIgnoringModifiers: charactersIgnoringModifiers,
+                modifierMask: modifierMask,
+                isRepeat: isRepeat),
+            store: store)
     }
 
     static func reservesChromiumShortcut(keyEquivalent: String,
@@ -350,15 +369,15 @@ enum LimitlessCommands {
                 return true
             }
             let wasLauncherVisible = store.launcherVisible
-            // Perform synchronously so the store mutation is done by the time
-            // the caller (LimitlessRoot.handleShortcutEvent) forces the chrome to
-            // repaint - see flushChrome().
+            // Execution happens on AppKit's main queue, so Swift state and
+            // native rendering observe the same ordered event turn.
             shortcut.perform(store)
             if wasLauncherVisible,
                store.launcherVisible,
                !launcherPersistentShortcutIDs.contains(shortcut.id) {
                 store.dismissLauncher()
             }
+            ChromeTransitionDriver.shared.scheduleViewUpdates()
             // Record only the first (non-repeat) press as the dedup anchor, so
             // a held key's repeats don't slide the window forward and make a
             // genuine fresh press just after release look like a duplicate.
@@ -373,10 +392,22 @@ enum LimitlessCommands {
 
         if let command = ExtensionStore.shared.command(matching: trigger) {
             ExtensionStore.shared.activate(command)
+            ChromeTransitionDriver.shared.scheduleViewUpdates()
             return true
         }
 
         return false
+    }
+
+    private static func canHandle(_ trigger: LimitlessShortcutTrigger,
+                                  store: BrowserStore) -> Bool {
+        if shortcuts.contains(where: { $0.matches(trigger, store: store) }) {
+            return true
+        }
+        if isTextEditingShortcut(trigger) {
+            return false
+        }
+        return ExtensionStore.shared.command(matching: trigger) != nil
     }
 
     private static func remember(_ eventIdentity: ShortcutEventIdentity?) {

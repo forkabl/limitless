@@ -153,6 +153,10 @@ typedef void (^LimitlessJavaScriptResultHandler)(id _Nullable result,
 /// separate from NSView.hidden because CEF keeps its own visibility state.
 - (void)setWebWindowVisible:(BOOL)visible;
 
+/// Commit the wrapper's settled bounds to Chromium's native child once after a
+/// chrome geometry transition.
+- (void)commitViewportLayout;
+
 /// Let chrome-owned auxiliary views (extension action popovers, etc.) remain
 /// drawable while Limitless hides normal tab web content behind full-window UI.
 - (void)setIgnoresGlobalWebContentSuppression:(BOOL)ignores;

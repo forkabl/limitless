@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ScreenCaptureKit
 
 // MARK: - Store coordination & capture
 
@@ -26,14 +27,17 @@ extension BrowserStore {
         guard rect.width > 4, rect.height > 4 else { return }
         // Let SwiftUI tear the overlay down before grabbing the window, so the
         // dim/selection chrome isn't baked into the screenshot.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
-            self?.performRegionCapture(rect)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.performRegionCapture(rect)
+            }
         }
     }
 
-    private func performRegionCapture(_ rect: CGRect) {
+    @MainActor
+    private func performRegionCapture(_ rect: CGRect) async {
         guard let window = captureWindow(),
-              let full = Self.captureWindowImage(window) else {
+              let full = await Self.captureWindowImage(window) else {
             ToastCenter.shared.show("Couldn't capture the window", icon: "xmark", style: .warning)
             return
         }
@@ -48,12 +52,25 @@ extension BrowserStore {
 
     /// Capture just the active tab's visible web content (the viewport).
     func captureVisibleArea() {
+        // Launcher commands dismiss their overlay immediately before calling
+        // this method. Wait for that SwiftUI removal so chrome is not baked
+        // into the page capture.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.performVisibleAreaCapture()
+            }
+        }
+    }
+
+    @MainActor
+    private func performVisibleAreaCapture() async {
         guard let tab = selectedTab, tab.hasRealized else {
             ToastCenter.shared.show("Nothing to capture", icon: "camera", style: .warning)
             return
         }
         let view = tab.browserView
-        guard let window = view.window, let full = Self.captureWindowImage(window) else {
+        guard let window = view.window,
+              let full = await Self.captureWindowImage(window) else {
             ToastCenter.shared.show("Couldn't capture the page", icon: "xmark", style: .warning)
             return
         }
@@ -79,16 +96,34 @@ extension BrowserStore {
         return webWindow ?? NSApp.keyWindow ?? NSApp.mainWindow
     }
 
-    /// Grab the composited image of our own window (no screen-recording
-    /// permission needed for one's own windows).
-    private static func captureWindowImage(_ window: NSWindow) -> CGImage? {
+    /// Grab the composited image of our own window with the supported macOS 14
+    /// screenshot API.
+    @MainActor
+    private static func captureWindowImage(_ window: NSWindow) async -> CGImage? {
         let windowID = CGWindowID(window.windowNumber)
         guard windowID != 0 else { return nil }
-        return CGWindowListCreateImage(
-            .null,
-            .optionIncludingWindow,
-            windowID,
-            [.boundsIgnoreFraming, .bestResolution])
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true)
+            guard let sharedWindow = content.windows.first(where: {
+                $0.windowID == windowID
+            }) else { return nil }
+
+            let filter = SCContentFilter(desktopIndependentWindow: sharedWindow)
+            let configuration = SCStreamConfiguration()
+            configuration.width = Int(
+                filter.contentRect.width * CGFloat(filter.pointPixelScale))
+            configuration.height = Int(
+                filter.contentRect.height * CGFloat(filter.pointPixelScale))
+            configuration.showsCursor = false
+            configuration.ignoreShadowsSingleWindow = true
+            configuration.captureResolution = .best
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: configuration)
+        } catch {
+            return nil
+        }
     }
 
     /// Copy the capture to the clipboard and save a PNG to the Desktop.
