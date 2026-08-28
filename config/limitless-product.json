@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "chromiumRevision": "2b4613f0a24d234b139f1246028239a2f5dde58c",
+  "chromiumRevision": "5b586c06e0d27582900f17e2d59c5370d8d6e0bb",
   "productName": "Limitless",
   "bundleIdentifier": "com.limitless.browser",
   "helperBundleIdentifierPrefix": "com.limitless.browser.helper",
