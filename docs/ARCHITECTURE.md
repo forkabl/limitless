@@ -1,8 +1,8 @@
-# Mori Architecture
+# Limitless Architecture
 
-Mori is a native macOS browser chrome embedded in the Chromium `chrome` target.
+Limitless is a native macOS browser chrome embedded in the Chromium `chrome` target.
 The boundary is intentionally simple: Chromium owns browser primitives, while
-Mori owns the native chrome and the bridge layer that asks Chromium to act.
+Limitless owns the native chrome and the bridge layer that asks Chromium to act.
 
 ## Runtime Layers
 
@@ -11,7 +11,7 @@ SwiftUI chrome
   RootView, Sidebar, Toolbar, LauncherOverlay, panels, themes, stores
 
 Objective-C++ bridge
-  mori_chrome_bridge.mm, mori_browser_window.mm, extension and permission glue
+  limitless_chrome_bridge.mm, limitless_browser_window.mm, extension and permission glue
 
 Chromium browser stack
   Browser, WebContents, tabs, navigation, renderers, extensions, downloads
@@ -19,9 +19,9 @@ Chromium browser stack
 
 ## Ownership Rules
 
-- Swift files under `chrome/browser/ui/mori` own visible Mori UI, local app
+- Swift files under `chrome/browser/ui/limitless` own visible Limitless UI, local app
   state, shortcut routing, settings, and feature models.
-- Objective-C++ files under the same directory translate Mori actions into
+- Objective-C++ files under the same directory translate Limitless actions into
   Chromium browser commands and forward Chromium state back into Swift.
 - Chromium continues to own page loading, renderer lifecycle, permissions,
   downloads, extensions, session primitives, and web text input.
@@ -30,10 +30,10 @@ Chromium browser stack
 
 ## Main Data Flow
 
-1. `mori_browser_window.mm` installs Mori into the Chromium browser window.
-2. `MoriRoot.swift` creates the SwiftUI root view and the shared `BrowserStore`.
+1. `limitless_browser_window.mm` installs Limitless into the Chromium browser window.
+2. `LimitlessRoot.swift` creates the SwiftUI root view and the shared `BrowserStore`.
 3. SwiftUI views mutate `BrowserStore` in response to user actions.
-4. `mori_chrome_bridge.mm` converts those actions into Chromium operations.
+4. `limitless_chrome_bridge.mm` converts those actions into Chromium operations.
 5. Bridge callbacks update Swift stores so the chrome reflects Chromium state.
 
 ## Keyboard Flow
@@ -41,8 +41,8 @@ Chromium browser stack
 Keyboard handling is shared between AppKit and Chromium web-view pre-handling:
 
 - `ShortcutRegistry.swift` defines the single command routing table.
-- `MoriRoot.swift` exposes Objective-C entry points for shortcut handling.
-- `mori_browser_window.mm` forwards web-focused key events before Chromium
+- `LimitlessRoot.swift` exposes Objective-C entry points for shortcut handling.
+- `limitless_browser_window.mm` forwards web-focused key events before Chromium
   consumes them.
 - Accepted shortcuts force a SwiftUI redraw pulse so state changes become
   visible immediately under Chromium's macOS message pump.
@@ -58,12 +58,12 @@ Keyboard handling is shared between AppKit and Chromium web-view pre-handling:
   and `BrowserAutomation.swift`.
 - Per-site customization: `Boosts.swift`, `BoostStore.swift`, `Reader.swift`,
   `Peek.swift`, `AirTrafficControl.swift`, and `RouteStore.swift`.
-- Chromium integration: `mori_chrome_bridge.mm`, `mori_browser_window.mm`,
-  `mori_chrome_extensions.mm`, `mori_permission_prompt.mm`, and bridge headers.
+- Chromium integration: `limitless_chrome_bridge.mm`, `limitless_browser_window.mm`,
+  `limitless_chrome_extensions.mm`, `limitless_permission_prompt.mm`, and bridge headers.
 
 ## Structural Notes
 
-The Mori source directory is currently flat because Chromium's GN target lists
+The Limitless source directory is currently flat because Chromium's GN target lists
 Swift sources explicitly in `chrome/browser/ui/BUILD.gn`. Moving files into
 subdirectories is possible, but should be done as a separate build-verified
 change that updates the GN source list at the same time.

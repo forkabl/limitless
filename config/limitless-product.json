@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "chromiumRevision": "5b586c06e0d27582900f17e2d59c5370d8d6e0bb",
+  "productName": "Limitless",
+  "bundleIdentifier": "com.limitless.browser",
+  "helperBundleIdentifierPrefix": "com.limitless.browser.helper",
+  "frameworkBundleIdentifier": "com.limitless.browser.framework",
+  "appBundleName": "Limitless.app",
+  "executableName": "Limitless",
+  "frameworkName": "Limitless Framework",
+  "minimumMacOSVersion": "14.0",
+  "internalURLScheme": "limitless",
+  "applicationSupportDirectory": "Limitless/Native",
+  "defaultsKeyPrefix": "limitless.",
+  "environmentKeyPrefix": "LIMITLESS_",
+  "agentToolPrefix": "limitless_",
+  "releaseVolumeName": "Limitless"
+}

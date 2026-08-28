@@ -1,0 +1,396 @@
+diff --git a/build/config/apple/swift_source_set.gni b/build/config/apple/swift_source_set.gni
+index ed3d091330..e9c33ff042 100644
+--- a/build/config/apple/swift_source_set.gni
++++ b/build/config/apple/swift_source_set.gni
+@@ -272,7 +272,9 @@ template("swift_source_set") {
+     if (!defined(public_configs)) {
+       public_configs = []
+     }
+-    public_configs += [ "//build/config/ios:swift_cxx_interop_includes" ]
++    if (current_os == "ios") {
++      public_configs += [ "//build/config/ios:swift_cxx_interop_includes" ]
++    }
+   }
+ }
+ 
+diff --git a/build/config/mac/BUILD.gn b/build/config/mac/BUILD.gn
+index 56238a14ae..e96fd4f150 100644
+--- a/build/config/mac/BUILD.gn
++++ b/build/config/mac/BUILD.gn
+@@ -34,6 +34,12 @@ config("compiler") {
+ 
+   asmflags = common_mac_flags
+   cflags = common_mac_flags
++  swiftflags = [
++    "-target",
++    "$clang_arch-apple-macosx$mac_min_system_version",
++    "-swift-version",
++    "5",
++  ]
+ 
+   ldflags = common_mac_flags
+ 
+@@ -65,6 +71,10 @@ config("runtime_library") {
+ 
+   asmflags = common_flags
+   cflags = common_flags
++  swiftflags = [
++    "-sdk",
++    rebase_path(sysroot, root_build_dir),
++  ]
+   ldflags = common_flags
+ 
+   # TODO(https://crbug.com/442128549): see if we can convince upstream rust to
+diff --git a/build/toolchain/apple/toolchain.gni b/build/toolchain/apple/toolchain.gni
+index 50d501b45c..d9f72cae42 100644
+--- a/build/toolchain/apple/toolchain.gni
++++ b/build/toolchain/apple/toolchain.gni
+@@ -763,10 +763,10 @@ template("single_apple_toolchain") {
+       pool = "//build/toolchain/apple:bundle_pool($default_toolchain)"
+     }
+ 
+-    # Swift is only used on iOS, not macOS. We want to minimize the number
+-    # of Xcode-based tools used by the macOS toolchain, so we intentionally
+-    # disallow future uses of Swift on macOS. https://crbug.com/965663.
+-    if (toolchain_args.current_os == "ios") {
++    # Limitless embeds a native SwiftUI browser shell, so expose Chromium's
++    # existing Apple Swift compiler tool on macOS as well as iOS.
++    if (toolchain_args.current_os == "ios" ||
++        toolchain_args.current_os == "mac") {
+       tool("swift") {
+         _tool = rebase_path("//build/toolchain/apple/swiftc.py", root_build_dir)
+ 
+@@ -850,7 +850,8 @@ template("single_apple_toolchain") {
+           _env_vars += " XCODE_VERSION=${toolchain_args.xcode_build}"
+         }
+ 
+-        if (invoker.sdk_developer_dir != "") {
++        if (defined(invoker.sdk_developer_dir) &&
++            invoker.sdk_developer_dir != "") {
+           _env_vars += " DEVELOPER_DIR=${toolchain_args.sdk_developer_dir}"
+         }
+ 
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index 18417167ff..f2386f980a 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -473,6 +473,14 @@ if (is_win) {
+     objdump_path = rebase_path("$clang_base_path/bin/", root_build_dir)
+   }
+ 
++  config("limitless_macos_link_target") {
++    ldflags = [
++      "-mmacos-version-min=$mac_min_system_version",
++      "-Wl,--ignore-auto-link-option=CoreAudioTypes",
++    ]
++    lib_dirs = [ "$mac_sdk_path/usr/lib/swift" ]
++  }
++
+   group("chrome") {
+     deps = [ ":chrome_app" ]
+ 
+@@ -647,6 +655,38 @@ if (is_win) {
+     outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
+   }
+ 
++  bundle_data("limitless_glyphs") {
++    sources = [
++      "browser/ui/limitless/glyphs/glyph-asterisk.svg",
++      "browser/ui/limitless/glyphs/glyph-bell.svg",
++      "browser/ui/limitless/glyphs/glyph-bolt.svg",
++      "browser/ui/limitless/glyphs/glyph-bookmark.svg",
++      "browser/ui/limitless/glyphs/glyph-chat.svg",
++      "browser/ui/limitless/glyphs/glyph-circle.svg",
++      "browser/ui/limitless/glyphs/glyph-cloud.svg",
++      "browser/ui/limitless/glyphs/glyph-code.svg",
++      "browser/ui/limitless/glyphs/glyph-egg.svg",
++      "browser/ui/limitless/glyphs/glyph-heart.svg",
++      "browser/ui/limitless/glyphs/glyph-leaf.svg",
++      "browser/ui/limitless/glyphs/glyph-lightbulb.svg",
++      "browser/ui/limitless/glyphs/glyph-limitless.svg",
++      "browser/ui/limitless/glyphs/glyph-moon.svg",
++      "browser/ui/limitless/glyphs/glyph-music.svg",
++      "browser/ui/limitless/glyphs/glyph-paw.svg",
++      "browser/ui/limitless/glyphs/glyph-plane.svg",
++      "browser/ui/limitless/glyphs/glyph-planet.svg",
++      "browser/ui/limitless/glyphs/glyph-skull.svg",
++      "browser/ui/limitless/glyphs/glyph-star.svg",
++      "browser/ui/limitless/glyphs/glyph-tools.svg",
++      "browser/ui/limitless/glyphs/glyph-triangle.svg",
++      "browser/ui/limitless/glyphs/glyph-users.svg",
++      "browser/ui/limitless/glyphs/glyph-utensils.svg",
++      "browser/ui/limitless/glyphs/glyph-video.svg",
++    ]
++    outputs =
++        [ "{{bundle_resources_dir}}/LimitlessGlyphs/{{source_file_part}}" ]
++  }
++
+   bundle_data("chrome_resources") {
+     sources = [
+       "$root_out_dir/$chrome_mac_bundle_id.manifest",
+@@ -657,6 +697,7 @@ if (is_win) {
+       ":chrome_app_icon",
+       ":chrome_app_strings",
+       ":chrome_asset_catalog",
++      ":limitless_glyphs",
+       "//components/policy:chrome_manifest_bundle",
+     ]
+   }
+@@ -1169,6 +1210,7 @@ if (is_win) {
+     ldflags = [ "-ObjC" ]
+ 
+     configs += [
+       ":chrome_dll_symbol_order",
++      ":limitless_macos_link_target",
+       "//build/config/compiler:wexit_time_destructors",
+     ]
+@@ -1190,8 +1232,11 @@ if (is_win) {
+     if (is_chrome_branded) {
+       framework_contents += [ "Default Apps" ]
+     }
+ 
+-    configs += [ "//build/config/compiler:wexit_time_destructors" ]
++    configs += [
++      ":limitless_macos_link_target",
++      "//build/config/compiler:wexit_time_destructors",
++    ]
+     configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
+     configs += [ "//build/config/compiler:thinlto_optimize_max" ]
+ 
+@@ -1201,6 +1246,7 @@ if (is_win) {
+       "CHROMIUM_SHORT_NAME=$chrome_product_short_name",
+     ]
+ 
+     public_deps = [ ":chrome_dll" ]
++    public_configs = [ ":limitless_macos_link_target" ]
+ 
+     bundle_deps = [
+diff --git a/chrome/app/theme/chromium/BRANDING b/chrome/app/theme/chromium/BRANDING
+index f8363d5b29..0a946befac 100644
+--- a/chrome/app/theme/chromium/BRANDING
++++ b/chrome/app/theme/chromium/BRANDING
+@@ -1,10 +1,10 @@
+-COMPANY_FULLNAME=The Chromium Authors
+-COMPANY_SHORTNAME=The Chromium Authors
+-PRODUCT_FULLNAME=Chromium
+-PRODUCT_SHORTNAME=Chromium
+-PRODUCT_INSTALLER_FULLNAME=Chromium Installer
+-PRODUCT_INSTALLER_SHORTNAME=Chromium Installer
+-COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Chromium Authors. All rights reserved.
+-MAC_BUNDLE_ID=org.chromium.Chromium
+-MAC_CREATOR_CODE=Cr24
++COMPANY_FULLNAME=Limitless
++COMPANY_SHORTNAME=Limitless
++PRODUCT_FULLNAME=Limitless
++PRODUCT_SHORTNAME=Limitless
++PRODUCT_INSTALLER_FULLNAME=Limitless Installer
++PRODUCT_INSTALLER_SHORTNAME=Limitless Installer
++COPYRIGHT=Copyright @LASTCHANGE_YEAR@ Limitless contributors. All rights reserved.
++MAC_BUNDLE_ID=com.limitless.browser
++MAC_CREATOR_CODE=Lmts
+ MAC_TEAM_ID=
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index b669d4f3ee..5f472693de 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -7,6 +7,9 @@ import("//build/config/compiler/compiler.gni")
+ import("//build/config/features.gni")
+ import("//build/config/ozone.gni")
+ import("//build/config/ui.gni")
++if (is_mac) {
++  import("//build/config/apple/swift_source_set.gni")
++}
+ import("//chrome/browser/buildflags.gni")
+ import("//chrome/common/features.gni")
+ import("//components/captive_portal/core/features.gni")
+@@ -69,6 +72,90 @@ source_set("web_app_testing_flags") {
+   ]
+ }
+ 
++if (is_mac) {
++  swift_source_set("limitless_ui_swift") {
++    bridge_header = "limitless/limitless_bridge.h"
++    sources = [
++      "limitless/AIConversationViews.swift",
++      "limitless/AIPanel.swift",
++      "limitless/AgentThreadView.swift",
++      "limitless/AirTrafficControl.swift",
++      "limitless/ArchiveStore.swift",
++      "limitless/BookmarkStore.swift",
++      "limitless/BoostStore.swift",
++      "limitless/Boosts.swift",
++      "limitless/BrowserAutomation.swift",
++      "limitless/BrowserContext.swift",
++      "limitless/BrowserSettings.swift",
++      "limitless/BrowserStore+DragDrop.swift",
++      "limitless/BrowserStore.swift",
++      "limitless/BrowserTab.swift",
++      "limitless/CodexAppServerClient.swift",
++      "limitless/Components.swift",
++      "limitless/ContextMenu.swift",
++      "limitless/Contexts.swift",
++      "limitless/DownloadStore.swift",
++      "limitless/DownloadsPanel.swift",
++      "limitless/ExtensionStore.swift",
++      "limitless/ExtensionsMenu.swift",
++      "limitless/FaviconKit.swift",
++      "limitless/FaviconStore.swift",
++      "limitless/FindBar.swift",
++      "limitless/FontRegistry.swift",
++      "limitless/Glass.swift",
++      "limitless/GradientEngine.swift",
++      "limitless/GradientTheme.swift",
++      "limitless/HistoryStore.swift",
++      "limitless/Icon.swift",
++      "limitless/LauncherOverlay.swift",
++      "limitless/LibraryPanel.swift",
++      "limitless/LimitlessRoot.swift",
++      "limitless/MediaAgentScripts.swift",
++      "limitless/MediaController.swift",
++      "limitless/MediaPlayer.swift",
++      "limitless/MediaPolling.swift",
++      "limitless/MorphingFolderIcon.swift",
++      "limitless/OKLCH.swift",
++      "limitless/PageActionOverlay.swift",
++      "limitless/PasskeyAuthenticator.swift",
++      "limitless/PasskeyBridge.swift",
++      "limitless/PasskeySupport.swift",
++      "limitless/Peek.swift",
++      "limitless/PiPWindowStyler.swift",
++      "limitless/Reader.swift",
++      "limitless/RootView.swift",
++      "limitless/RouteStore.swift",
++      "limitless/Screenshot.swift",
++      "limitless/SettingsView.swift",
++      "limitless/ShortcutRegistry.swift",
++      "limitless/Sidebar.swift",
++      "limitless/SidebarPeek.swift",
++      "limitless/TabFolder.swift",
++      "limitless/TabMaintenance.swift",
++      "limitless/TabRow.swift",
++      "limitless/Theme.swift",
++      "limitless/ThemePicker.swift",
++      "limitless/ThemePresets.swift",
++      "limitless/ToastCenter.swift",
++      "limitless/ToastOverlay.swift",
++      "limitless/Toolbar.swift",
++      "limitless/WebContainerView.swift",
++    ]
++    frameworks = [
++      "AppKit.framework",
++      "AVFoundation.framework",
++      "Combine.framework",
++      "CoreImage.framework",
++      "CryptoKit.framework",
++      "Foundation.framework",
++      "LocalAuthentication.framework",
++      "Security.framework",
++      "SwiftUI.framework",
++      "UniformTypeIdentifiers.framework",
++    ]
++  }
++}
++
+ # Use a static library here because many test binaries depend on this but don't
+ # require many files from it. This makes linking more efficient.
+ # TODO(https://crbug.com/353332589): Once //chrome/browser is properly
+@@ -3231,6 +3318,10 @@ static_library("ui") {
+       "browser_mac.h",
+       "fullscreen_util_mac.cc",
+       "fullscreen_util_mac.h",
++      "limitless/limitless_browser_window.mm",
++      "limitless/limitless_chrome_bridge.mm",
++      "limitless/limitless_chrome_extensions.mm",
++      "limitless/limitless_permission_prompt.mm",
+       "views/apps/chrome_app_window_client_views_mac.mm",
+       "views/certificate_viewer_mac_views.mm",
+       "views/frame/browser_frame_view_factory_mac.mm",
+@@ -3259,6 +3350,7 @@ static_library("ui") {
+     ]
+ 
+     deps += [
++      ":limitless_ui_swift",
+       "//chrome/browser:app_controller_mac",
+       "//chrome/browser:chrome_browser_application_mac",
+       "//chrome/browser:global_keyboard_shortcuts_mac",
+diff --git a/chrome/browser/ui/views/frame/browser_window_factory.cc b/chrome/browser/ui/views/frame/browser_window_factory.cc
+index 7a0111c300..b8805e5bd1 100644
+--- a/chrome/browser/ui/views/frame/browser_window_factory.cc
++++ b/chrome/browser/ui/views/frame/browser_window_factory.cc
+@@ -17,6 +17,10 @@
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/views/widget/widget.h"
+ 
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/ui/limitless/limitless_browser_window.h"
++#endif
++
+ #if defined(USE_AURA)
+ #include "ui/aura/client/aura_constants.h"
+ #include "ui/aura/window.h"
+@@ -33,6 +37,13 @@ std::unique_ptr<BrowserWindow, BrowserWindowDeleter>
+ BrowserWindow::CreateBrowserWindow(Browser* browser,
+                                    bool user_gesture,
+                                    bool in_tab_dragging) {
++#if BUILDFLAG(IS_MAC)
++  if (browser->is_type_normal()) {
++    return std::unique_ptr<BrowserWindow, BrowserWindowDeleter>(
++        new LimitlessBrowserWindow(browser));
++  }
++#endif
++
+   if (webui_browser::IsWebUIBrowserEnabled() && browser->is_type_normal()) {
+     return std::unique_ptr<BrowserWindow, BrowserWindowDeleter>(
+         new WebUIBrowserWindow(browser));
+diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
+index a614311803..04c8f10e2f 100644
+--- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
++++ b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
+@@ -33,6 +33,7 @@
+ #include "third_party/blink/public/common/features_generated.h"
+ 
+ #if BUILDFLAG(IS_MAC)
++#include "chrome/browser/ui/limitless/limitless_permission_prompt.h"
+ #include "chrome/browser/ui/views/permissions/permission_prompt_notifications_mac.h"
+ #include "chrome/browser/web_applications/os_integration/mac/web_app_shortcut_mac.h"
+ #endif
+@@ -255,6 +256,13 @@ std::unique_ptr<permissions::PermissionPrompt> CreateQuietPrompt(
+ std::unique_ptr<permissions::PermissionPrompt> CreatePermissionPrompt(
+     content::WebContents* web_contents,
+     permissions::PermissionPrompt::Delegate* delegate) {
++#if BUILDFLAG(IS_MAC)
++  if (auto prompt =
++          limitless::CreateLimitlessPermissionPrompt(web_contents, delegate)) {
++    return prompt;
++  }
++#endif
++
+   BrowserWindowInterface* browser_window_interface =
+       GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
+   if (!browser_window_interface) {
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+index 0f6b2d9113..3a472d630d 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -1000,7 +1000,9 @@ void NewTabPageHandler::UpdateFooterVisibility() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  if (!footer_controller) {
++    return;
++  }
+   OnFooterVisibilityUpdated(footer_controller->GetFooterVisible(web_contents_));
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }
+@@ -1363,7 +1365,9 @@ void NewTabPageHandler::OnBrowserWindowInterfaceChanged() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  if (!footer_controller) {
++    return;
++  }
+   footer_controller_observation_.Observe(footer_controller);
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }

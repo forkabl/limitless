@@ -1,8 +1,8 @@
 # Working in this repo
 
-Mori is now a SwiftUI/AppKit browser chrome embedded into
+Limitless is now a SwiftUI/AppKit browser chrome embedded into
 ungoogled-chromium. The first-party source lives in
-`ungoogled-chromium-macos/build/src/chrome/browser/ui/mori`; the rest of the
+`ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless`; the rest of the
 Chromium checkout is a local build dependency.
 
 ## Required
@@ -18,24 +18,24 @@ See `BUILDING.md` for the canonical local build, package, run, and logging
 commands. The packaged app used for manual testing is:
 
 ```text
-$HOME/Downloads/MoriBrowser.app
+$HOME/Downloads/Limitless.app
 ```
 
 ## Architecture Notes
 
-- SwiftUI state and views are in `*.swift` files under the Mori overlay.
-- Objective-C++ Chromium integration lives in `mori_chrome_bridge.mm`,
-  `mori_browser_window.mm`, `mori_chrome_extensions.mm`, and related headers.
+- SwiftUI state and views are in `*.swift` files under the Limitless overlay.
+- Objective-C++ Chromium integration lives in `limitless_chrome_bridge.mm`,
+  `limitless_browser_window.mm`, `limitless_chrome_extensions.mm`, and related headers.
 - Chromium owns browser primitives such as tabs, navigation, renderers,
   extensions, downloads, permissions, and text input.
-- Mori owns the native chrome, sidebar, launcher, shortcut registry, app model,
+- Limitless owns the native chrome, sidebar, launcher, shortcut registry, app model,
   and bridge layer around Chromium.
 
 ## Git Hygiene
 
 - The full Chromium checkout, `depot_tools`, and build products are local and
   should not be committed.
-- The Mori overlay path is intentionally tracked even though it sits inside a
+- The Limitless overlay path is intentionally tracked even though it sits inside a
   Chromium checkout.
-- If the local ungoogled-chromium ignore rules hide Mori overlay files, stage
+- If the local ungoogled-chromium ignore rules hide Limitless overlay files, stage
   them explicitly with `git add -f`.
