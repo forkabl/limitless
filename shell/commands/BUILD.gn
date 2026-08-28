@@ -1,38 +1,43 @@
-#Copyright 2026 The Limitless Authors
-#Use of this source code is governed by a BSD - style license that can be
-#found in the LICENSE file.
+# Copyright 2026 The Limitless Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
 
-config("command_registry_public"){include_dirs = ["../.."]}
+config("command_registry_public") {
+  include_dirs = [ "../.." ]
+}
 
-source_set("command_registry"){
-    sources =
-        [
-          "limitless_command_registry.cc",
-          "limitless_command_registry.h",
-          "limitless_command_window_binding.cc",
-          "limitless_command_window_binding.h",
-        ]
+source_set("command_registry") {
+  sources = [
+    "limitless_command_registry.cc",
+    "limitless_command_registry.h",
+    "limitless_command_window_binding.cc",
+    "limitless_command_window_binding.h",
+  ]
 
-    public_configs = [":command_registry_public"] public_deps = ["//base"]}
+  public_configs = [ ":command_registry_public" ]
+  public_deps = [ "//base" ]
+}
 
-source_set("command_window_registry"){
-    sources =
-        [
-          "limitless_command_window_registry.cc",
-          "limitless_command_window_registry.h",
-        ] public_deps = [":command_registry"] deps =
-            [
-              "//chrome/browser/profiles",
-              "//chrome/browser/ui/browser_window:browser_window",
-            ]}
+source_set("command_window_registry") {
+  sources = [
+    "limitless_command_window_registry.cc",
+    "limitless_command_window_registry.h",
+  ]
+
+  public_deps = [ ":command_registry" ]
+  deps = [
+    "//chrome/browser/profiles",
+    "//chrome/browser/ui/browser_window",
+  ]
+}
 
 source_set("command_registry_tests") {
-  testonly = true sources =
-      ["../../tests/commands/limitless_command_registry_unittest.cc"]
+  testonly = true
+  sources = [ "../../tests/commands/limitless_command_registry_unittest.cc" ]
 
-      deps = [
-        ":command_registry",
-        "//base/test:test_support",
-        "//testing/gtest",
-      ]
+  deps = [
+    ":command_registry",
+    "//base/test:test_support",
+    "//testing/gtest",
+  ]
 }

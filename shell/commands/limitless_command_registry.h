@@ -126,6 +126,7 @@ enum class ProductCommandValidationStatus {
   kSameTab,
   kMemberNotInPair,
   kInvalidRatio,
+  kWindowTargetMismatch,
 };
 
 enum class ProductCommandQueryStatus {
