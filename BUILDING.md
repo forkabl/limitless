@@ -1,173 +1,141 @@
 # Building Limitless Browser
 
-This repository now contains the Limitless browser work on top of ungoogled-chromium
-instead of the old CEF app.
+Limitless is a native SwiftUI browser shell integrated into a pinned Chromium
+checkout. The Chromium checkout is intentionally kept outside this Git
+repository because a complete source tree and build output consume tens of
+gigabytes.
 
-## Layout
+## Tracked and generated files
 
-- `ungoogled-chromium-macos/build/src` is the Chromium source tree used for
-  day-to-day builds.
-- `out/Default/Limitless.app` inside that source tree is the local build output.
-- `$HOME/Downloads/Limitless.app` is the packaged app used for manual testing.
-- `depot_tools` and `binshims` are checked out beside the source tree and should
-  be placed on `PATH` for builds.
+- `ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless` contains the
+  tracked Limitless source overlay and brand resources.
+- `patches/chromium/limitless-integration.patch` contains the reviewed changes
+  to Chromium build files and browser factories.
+- `chromium.version` pins the only supported Chromium revision.
+- `<chromium-src>/out/Default/Limitless.app` is the generated local app.
 
 ## Prerequisites
 
-- macOS with Xcode installed at `/Applications/Xcode.app`.
-- The Chromium checkout and generated `out/Default` build directory already
-  present under `ungoogled-chromium-macos/build/src`.
-- The checkout must resolve to the exact revision recorded in
-  `chromium.version`.
-- Enough free disk space for Chromium link output and dSYMs.
+- macOS 14 or newer.
+- Xcode at `/Applications/Xcode.app`.
+- `depot_tools` on `PATH`.
+- Enough free space for the Chromium source, object files, and app bundle.
 
-## Build
+## Create the Chromium checkout
 
-On a populated checkout that still contains the previous local integration,
-run the idempotent rebrand transform once before generating or building:
-
-```sh
-scripts/rebrand_chromium_integration.sh
-```
-
-The transform updates ignored Chromium integration files around the tracked
-Limitless overlay. Review `chrome/browser/ui/BUILD.gn` and the generated app
-metadata after it runs.
-
-Run from the repository root:
+Keep the `.gclient` file in a dedicated parent directory. The following creates
+an exact checkout from the repository pin:
 
 ```sh
 repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root/ungoogled-chromium-macos/build/src"
+chromium_root="$HOME/Developer/limitless-chromium"
+revision="$(tr -d '[:space:]' < "$repo_root/chromium.version")"
+
+mkdir -p "$chromium_root"
+cd "$chromium_root"
+gclient config --name src https://chromium.googlesource.com/chromium/src.git
+gclient sync --no-history --nohooks --revision "src@$revision"
+gclient runhooks
+```
+
+## Prepare and build
+
+The preparation script validates the revision, applies the pinned integration
+patch, copies the tracked source overlay, installs the app icon and asset
+catalog, and can be run repeatedly.
+
+```sh
+repo_root="$(git rev-parse --show-toplevel)"
+chromium_src="$HOME/Developer/limitless-chromium/src"
+
+"$repo_root/scripts/rebrand_chromium_integration.sh" "$chromium_src"
+cd "$chromium_src"
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-export PATH="$repo_root/binshims:$repo_root/depot_tools:$PATH"
-ninja -j 16 -l 24 -C out/Default chrome
+
+buildtools/mac/gn gen out/Default --args='target_cpu="arm64"
+is_debug=true
+is_component_build=true
+symbol_level=0
+blink_symbol_level=0
+v8_symbol_level=0
+use_remoteexec=false
+use_siso=true
+mac_min_system_version="14.0"'
+
+autoninja -C out/Default chrome
 ```
 
-The normal successful build still prints warnings from Swift deployment-target
-mismatch and `CoreAudioTypes` auto-linking. Treat ninja exit code `0` as the
-source of truth.
+The SwiftUI shell uses macOS 14 APIs and Swift 5 language mode. The integration
+patch enables Chromium's existing Apple Swift tool for macOS and supplies the
+matching compiler flags.
 
-## Package To Downloads
+## Run an isolated local build
 
-After a successful build:
-
-```sh
-repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root/ungoogled-chromium-macos/build/src"
-if [ -e "$HOME/Downloads/Limitless.app" ]; then
-  trash "$HOME/Downloads/Limitless.app"
-fi
-/usr/bin/ditto "out/Default/Limitless.app" "$HOME/Downloads/Limitless.app"
-```
-
-Use `trash`, not `rm -rf`, when replacing old app bundles.
-
-Verify the packaged framework timestamp:
+Launch with a separate profile so development state never touches a normal
+Limitless profile:
 
 ```sh
-find "$HOME/Downloads/Limitless.app/Contents/Frameworks" \
-  -type f -name 'Limitless Framework' \
-  -exec stat -f '%Sm %N' -t '%Y-%m-%d %H:%M:%S' {} \;
-```
-
-## Run
-
-Open the packaged app:
-
-```sh
-/usr/bin/open -n "$HOME/Downloads/Limitless.app"
-```
-
-For isolated testing without reusing the main Chromium profile:
-
-```sh
+chromium_src="$HOME/Developer/limitless-chromium/src"
 profile="$HOME/Library/Application Support/LimitlessTestProfile"
+
 mkdir -p "$profile"
-/usr/bin/open -n "$HOME/Downloads/Limitless.app" --args \
+/usr/bin/open -n "$chromium_src/out/Default/Limitless.app" --args \
   --user-data-dir="$profile" \
   --no-first-run
 ```
 
-Check that it stayed running:
+Confirm that the expected executable stayed running:
 
 ```sh
-pgrep -fl "$HOME/Downloads/Limitless.app/Contents/MacOS/Limitless"
+pgrep -fl '/Limitless.app/Contents/MacOS/Limitless'
 ```
 
-## Logging
+## Verify the app
 
-For keyboard shortcut diagnostics, current instrumented builds emit `LIMITLESS-KEY`
-messages. To capture launch logs directly:
-
-```sh
-"$HOME/Downloads/Limitless.app/Contents/MacOS/Limitless" \
-  --enable-logging=stderr \
-  --v=0
-```
-
-You can also confirm an instrumented packaged binary contains the diagnostics:
-
-```sh
-find "$HOME/Downloads/Limitless.app/Contents/Frameworks" \
-  -type f -name 'Limitless Framework' \
-  -exec strings -a {} \; | grep -m 5 'LIMITLESS-KEY'
-```
-
-## Avoiding Stale Binaries
-
-If an already-running browser process is reused, it may still have the old
-framework loaded. For shortcut testing, prefer a fresh `open -n` launch with a
-separate `--user-data-dir`, or quit the existing app before testing the newly
-packaged bundle.
-
-## Verify Branding
-
-Run the source and asset contract checks after changing product code or
-resources:
+Run source and asset contract checks from the repository:
 
 ```sh
 scripts/verify_rebrand.sh
+tests/rebrand_contract_test.sh
 ```
 
-Pass an application path to verify its bundle identity and code signature too:
+Pass the app path to verify its product name, bundle identifiers, minimum macOS
+version, nested bundles, brand resources, and code signature:
 
 ```sh
-scripts/verify_rebrand.sh "$HOME/Downloads/Limitless.app"
+scripts/verify_rebrand.sh \
+  "$HOME/Developer/limitless-chromium/src/out/Default/Limitless.app"
 ```
 
-The canonical product identity is declared in
-`config/limitless-product.json`. Limitless is intentionally a clean-break app
-and does not read, move, or delete data belonging to an earlier product name.
+The canonical product identity lives in `config/limitless-product.json`.
+Limitless is a clean-break app and does not read, move, or delete data belonging
+to an earlier product identity.
 
-## Signed Release
+## Package a signed release
 
 The release script signs nested Chromium code, notarizes and staples the app,
 then emits a versioned ZIP and `Limitless.dmg`:
 
 ```sh
+export LIMITLESS_BUILD_DIR="$HOME/Developer/limitless-chromium/src/out/Default"
 export LIMITLESS_VERSION=1.0.0
 export LIMITLESS_SIGNING_IDENTITY='Developer ID Application: Example (TEAMID)'
 export LIMITLESS_NOTARY_PROFILE='limitless-notary'
 scripts/package_release.sh
 ```
 
-The credentials referenced by the keychain profile stay outside the
-repository. Override `LIMITLESS_BUILD_DIR`, `LIMITLESS_RELEASE_DIR`, or
-`LIMITLESS_ARCHITECTURE` when packaging a non-default build.
+The keychain profile keeps notarization credentials outside the repository.
+Override `LIMITLESS_RELEASE_DIR` or `LIMITLESS_ARCHITECTURE` when needed.
 
-## Common Build Loop
+## Common development loop
+
+After changing files in the tracked overlay, prepare again before rebuilding:
 
 ```sh
 repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root/ungoogled-chromium-macos/build/src"
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-export PATH="$repo_root/binshims:$repo_root/depot_tools:$PATH"
-ninja -j 16 -l 24 -C out/Default chrome
+chromium_src="$HOME/Developer/limitless-chromium/src"
 
-if [ -e "$HOME/Downloads/Limitless.app" ]; then
-  trash "$HOME/Downloads/Limitless.app"
-fi
-/usr/bin/ditto "out/Default/Limitless.app" "$HOME/Downloads/Limitless.app"
-/usr/bin/open -n "$HOME/Downloads/Limitless.app"
+"$repo_root/scripts/rebrand_chromium_integration.sh" "$chromium_src"
+autoninja -C "$chromium_src/out/Default" chrome
+scripts/verify_rebrand.sh "$chromium_src/out/Default/Limitless.app"
 ```

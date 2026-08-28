@@ -1,7 +1,6 @@
 # Limitless
 
-Limitless is an experimental native macOS browser chrome built into
-[ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium).
+Limitless is an experimental native macOS browser shell built into Chromium.
 SwiftUI and AppKit provide the interface, an Objective-C++ bridge connects it
 to Chromium, and Chromium owns the browser engine and primitives.
 

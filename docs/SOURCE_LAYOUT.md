@@ -1,7 +1,7 @@
 # Source Layout
 
 This repository tracks a narrow first-party Limitless overlay. A full Chromium
-checkout is restored locally at the documented ignored path for builds.
+checkout is restored outside the repository for builds.
 
 ## Repository Root
 
@@ -11,14 +11,17 @@ checkout is restored locally at the documented ignored path for builds.
 - `config/limitless-product.json` - product, bundle, protocol, and storage
   identity.
 - `assets/brand/` - authoritative full-color artwork and brand asset notes.
+- `patches/chromium/` - integration changes applied to the pinned Chromium
+  checkout.
 - `scripts/` - integration, asset generation, release, and verification tools.
 - `tests/` - source-level rebrand contract coverage.
 - `docs/ARCHITECTURE.md` - runtime boundaries and data flow.
-- `ungoogled-chromium-macos/build/src` - Chromium source tree used for builds.
-- `depot_tools` and `binshims` - local build tooling.
+- `ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless` - tracked
+  source overlay copied into a build checkout.
 
-Build products, the Chromium checkout, and `depot_tools` are local dependencies.
-The Limitless overlay under Chromium is the source of truth for app behavior.
+Build products, the Chromium checkout, and `depot_tools` are local dependencies
+outside this repository. The tracked Limitless overlay is the source of truth
+for app behavior.
 
 ## Limitless Overlay
 
@@ -90,11 +93,11 @@ ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless/README.md
 
 ## Build Wiring
 
-The Swift files are compiled by the `limitless_ui_swift` target in:
+The Swift files are compiled by the `limitless_ui_swift` target added by:
 
 ```text
-ungoogled-chromium-macos/build/src/chrome/browser/ui/BUILD.gn
+patches/chromium/limitless-integration.patch
 ```
 
-When adding, moving, or deleting Swift files, update that GN source list in the
-same change.
+When adding, moving, or deleting Swift files, update the GN source list in that
+patch in the same change.

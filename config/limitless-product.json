@@ -8,6 +8,7 @@
   "appBundleName": "Limitless.app",
   "executableName": "Limitless",
   "frameworkName": "Limitless Framework",
+  "minimumMacOSVersion": "14.0",
   "internalURLScheme": "limitless",
   "applicationSupportDirectory": "Limitless/Native",
   "defaultsKeyPrefix": "limitless.",

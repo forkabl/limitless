@@ -35,6 +35,7 @@ fi
 
 required_files='assets/brand/limitless.png
 chromium.version
+patches/chromium/limitless-integration.patch
 ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless/AppIcon.icns
 ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless/glyphs/glyph-limitless.svg
 config/limitless-product.json'
@@ -50,6 +51,9 @@ if [ "$(jq -r '.productName' config/limitless-product.json)" != "Limitless" ]; t
 fi
 if [ "$(jq -r '.bundleIdentifier' config/limitless-product.json)" != "com.limitless.browser" ]; then
   fail "the product contract has the wrong bundle identifier"
+fi
+if [ "$(jq -r '.minimumMacOSVersion' config/limitless-product.json)" != "14.0" ]; then
+  fail "the product contract has the wrong minimum macOS version"
 fi
 if [ "$(jq -r '.chromiumRevision' config/limitless-product.json)" != \
     "$(tr -d '[:space:]' <chromium.version)" ]; then
@@ -70,13 +74,18 @@ if [ "$#" -gt 0 ]; then
     executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist" 2>/dev/null || true)
     display_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$info_plist" 2>/dev/null || \
       /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$info_plist" 2>/dev/null || true)
+    minimum_system_version=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist" 2>/dev/null || true)
 
     [ "$bundle_id" = "com.limitless.browser" ] || fail "unexpected CFBundleIdentifier: $bundle_id"
     [ "$executable" = "Limitless" ] || fail "unexpected CFBundleExecutable: $executable"
     [ "$display_name" = "Limitless" ] || fail "unexpected app display name: $display_name"
+    [ "$minimum_system_version" = "14.0" ] || \
+      fail "unexpected LSMinimumSystemVersion: $minimum_system_version"
     [ -x "$app_path/Contents/MacOS/Limitless" ] || fail "the Limitless executable is missing"
     [ -d "$app_path/Contents/Frameworks/Limitless Framework.framework" ] || \
       fail "the Limitless framework bundle is missing"
+    [ -f "$app_path/Contents/Resources/LimitlessGlyphs/glyph-limitless.svg" ] || \
+      fail "the bundled Limitless glyph library is missing"
 
     find "$app_path/Contents" -name Info.plist -print0 |
     while IFS= read -r -d '' nested_plist; do

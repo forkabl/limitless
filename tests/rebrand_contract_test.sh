@@ -28,6 +28,15 @@ assert_contains 'BEGIN_LIMITLESS_TOOL_RESULT' \
   "$overlay/CodexAppServerClient.swift"
 assert_contains 'const key = "l" + (++registry.seq);' \
   "$overlay/BrowserAutomation.swift"
+assert_contains 'bundle_data("limitless_glyphs")' \
+  "$repo_root/patches/chromium/limitless-integration.patch"
+assert_contains 'toolchain_args.current_os == "mac"' \
+  "$repo_root/patches/chromium/limitless-integration.patch"
+
+if "$repo_root/scripts/rebrand_chromium_integration.sh" >/dev/null 2>&1; then
+  echo "error: the Chromium integration script accepted a missing checkout path" >&2
+  exit 1
+fi
 
 expected_tools='limitless_browser_action
 limitless_browser_snapshot
