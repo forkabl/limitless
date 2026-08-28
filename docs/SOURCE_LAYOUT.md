@@ -1,39 +1,45 @@
 # Source Layout
 
-This repository contains a full Chromium checkout, but the first-party Mori
-code is intentionally narrow.
+This repository tracks a narrow first-party Limitless overlay. A full Chromium
+checkout is restored locally at the documented ignored path for builds.
 
 ## Repository Root
 
 - `README.md` - project overview and entry point.
 - `BUILDING.md` - canonical build, package, run, and logging workflow.
+- `chromium.version` - exact Chromium revision required by integration checks.
+- `config/limitless-product.json` - product, bundle, protocol, and storage
+  identity.
+- `assets/brand/` - authoritative full-color artwork and brand asset notes.
+- `scripts/` - integration, asset generation, release, and verification tools.
+- `tests/` - source-level rebrand contract coverage.
 - `docs/ARCHITECTURE.md` - runtime boundaries and data flow.
 - `ungoogled-chromium-macos/build/src` - Chromium source tree used for builds.
 - `depot_tools` and `binshims` - local build tooling.
 
 Build products, the Chromium checkout, and `depot_tools` are local dependencies.
-The Mori overlay under Chromium is the source of truth for app behavior.
+The Limitless overlay under Chromium is the source of truth for app behavior.
 
-## Mori Overlay
+## Limitless Overlay
 
 Path:
 
 ```text
-ungoogled-chromium-macos/build/src/chrome/browser/ui/mori/
+ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless/
 ```
 
-Do not edit older prototypes under `content/shell/browser/mori`; they are not
+Do not edit older prototypes under `content/shell/browser/limitless`; they are not
 the app that gets packaged.
 
 There is also a local overlay guide at:
 
 ```text
-ungoogled-chromium-macos/build/src/chrome/browser/ui/mori/README.md
+ungoogled-chromium-macos/build/src/chrome/browser/ui/limitless/README.md
 ```
 
 ## SwiftUI Chrome
 
-- `MoriRoot.swift` - SwiftUI root, Objective-C entry points, and the shared
+- `LimitlessRoot.swift` - SwiftUI root, Objective-C entry points, and the shared
   app model exposed to the bridge.
 - `RootView.swift`, `Sidebar.swift`, `Toolbar.swift`, `TabRow.swift`,
   `LauncherOverlay.swift` - browser chrome, tab surfaces, and command palette.
@@ -72,19 +78,19 @@ ungoogled-chromium-macos/build/src/chrome/browser/ui/mori/README.md
 
 ## Chromium Bridge
 
-- `mori_bridge.h` - Swift bridging header.
-- `mori_chrome_bridge.mm` - main Swift/AppKit to Chromium integration layer.
-- `mori_browser_window.mm` and `mori_browser_window.h` - browser window
+- `limitless_bridge.h` - Swift bridging header.
+- `limitless_chrome_bridge.mm` - main Swift/AppKit to Chromium integration layer.
+- `limitless_browser_window.mm` and `limitless_browser_window.h` - browser window
   lifecycle and web-focused keyboard handling.
-- `mori_chrome_extensions.mm` - Chromium extension API integration.
-- `mori_permission_prompt.mm` and `mori_permission_prompt.h` - permission UI
+- `limitless_chrome_extensions.mm` - Chromium extension API integration.
+- `limitless_permission_prompt.mm` and `limitless_permission_prompt.h` - permission UI
   integration.
-- `MoriBrowserView.h`, `MoriPrivacy.h`, `mori_chrome_hooks.h` - remaining
+- `LimitlessBrowserView.h`, `LimitlessPrivacy.h`, `limitless_chrome_hooks.h` - remaining
   bridge declarations.
 
 ## Build Wiring
 
-The Swift files are compiled by the `mori_ui_swift` target in:
+The Swift files are compiled by the `limitless_ui_swift` target in:
 
 ```text
 ungoogled-chromium-macos/build/src/chrome/browser/ui/BUILD.gn
