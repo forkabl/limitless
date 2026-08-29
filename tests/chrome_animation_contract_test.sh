@@ -87,6 +87,10 @@ assert_absent 'SynchronouslyDestroyBrowser();' \
   "$overlay/limitless_browser_window.mm"
 assert_contains 'PrepareLimitlessBrowserForDestruction(browser_);' \
   "$overlay/limitless_browser_window.mm"
+assert_contains 'NSView* content = limitless::LimitlessMainWindow().contentView;' \
+  "$overlay/limitless_browser_window.mm"
+assert_contains 'return GetRestoredBounds().size();' \
+  "$overlay/limitless_browser_window.mm"
 assert_contains 'RegisterOrphanWebContents("limitless-retired://startup", blank);' \
   "$overlay/limitless_chrome_bridge.mm"
 assert_contains 'class JavaScriptResultCompletion' \

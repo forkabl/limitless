@@ -724,7 +724,20 @@ bool LimitlessBrowserWindow::IsForceFullscreen() const {
 void LimitlessBrowserWindow::SetForceFullscreen(bool force_fullscreen) {}
 
 gfx::Size LimitlessBrowserWindow::GetContentsSize() const {
-  return {};
+  NSView* content = limitless::LimitlessMainWindow().contentView;
+  if (content) {
+    const gfx::Size content_size(NSWidth(content.bounds),
+                                 NSHeight(content.bounds));
+    if (!content_size.IsEmpty()) {
+      return content_size;
+    }
+  }
+
+  // Session restore asks for a non-empty initial WebContents size before the
+  // SwiftUI hierarchy has necessarily created the shared NSWindow. Seed the
+  // renderer from the restored window size; WebContainerView applies the exact
+  // viewport geometry when it attaches the native view.
+  return GetRestoredBounds().size();
 }
 
 void LimitlessBrowserWindow::SetContentsSize(const gfx::Size& size) {}
