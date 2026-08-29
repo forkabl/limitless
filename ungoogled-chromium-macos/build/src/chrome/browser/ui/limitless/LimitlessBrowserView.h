@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef void (^LimitlessJavaScriptResultHandler)(id _Nullable result,
                                               NSString *_Nullable errorMessage);
+typedef void (^LimitlessViewportResizeCompletion)(uint64_t generation,
+                                                  BOOL successfullyPresented);
 
 /// Navigation/display state callbacks. All methods are delivered on the main
 /// thread, so delegates may update UI directly.
@@ -153,9 +155,27 @@ typedef void (^LimitlessJavaScriptResultHandler)(id _Nullable result,
 /// separate from NSView.hidden because CEF keeps its own visibility state.
 - (void)setWebWindowVisible:(BOOL)visible;
 
-/// Commit the wrapper's settled bounds to Chromium's native child once after a
-/// chrome geometry transition.
-- (void)commitViewportLayout;
+/// Submit a desired renderer viewport size. Chromium allows one renderer resize
+/// to be outstanding and replaces any queued resize with the latest request.
+/// Terminal requests complete only after the matching surface is successfully
+/// presented. A false completion means cancellation or renderer teardown, not
+/// successful presentation.
+- (void)requestViewportSize:(NSSize)size
+                 generation:(uint64_t)generation
+                   terminal:(BOOL)terminal
+                 completion:(nullable LimitlessViewportResizeCompletion)completion;
+
+/// Atomically reveal a viewport whose terminal request completed. This updates
+/// only the native wrapper geometry; it never forces synchronous subtree layout.
+- (void)presentCommittedViewportSize:(NSSize)size;
+
+/// Keep Chromium viewport sizing in local coordinates while an AppKit ancestor
+/// applies the temporary coordinate-correct presentation transform.
+- (void)setViewportPresentationTransformActive:(BOOL)active;
+
+/// Cancel all coordinated resize work and restore Chromium's normal deadline
+/// policy. Pending terminal completions resolve as unsuccessful.
+- (void)cancelViewportResize;
 
 /// Let chrome-owned auxiliary views (extension action popovers, etc.) remain
 /// drawable while Limitless hides normal tab web content behind full-window UI.

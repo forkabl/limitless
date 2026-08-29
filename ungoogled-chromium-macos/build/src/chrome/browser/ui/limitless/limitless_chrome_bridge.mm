@@ -5,6 +5,7 @@
 
 #import "chrome/browser/ui/limitless/LimitlessBrowserView.h"
 #import "chrome/browser/ui/limitless/LimitlessPrivacy.h"
+#import <QuartzCore/QuartzCore.h>
 #include "chrome/browser/ui/limitless/limitless_chrome_hooks.h"
 
 #include <algorithm>
@@ -59,7 +60,9 @@
 #include "services/network/public/mojom/cookie_manager.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/gfx/geometry/dip_util.h"
 #include "ui/gfx/image/image.h"
+#include "ui/gfx/geometry/size_conversions.h"
 #include "url/gurl.h"
 
 // Swift-exported surface of LimitlessRoot (LimitlessRoot.swift).
@@ -532,6 +535,8 @@ class JavaScriptResultCompletion {
 }  // namespace
 
 // Engine-facing surface of LimitlessBrowserView (called from the C++ observers).
+@class LimitlessViewportResizeRequest;
+
 @interface LimitlessBrowserView ()
 - (void)engineAttachWebContents:(content::WebContents*)webContents;
 - (void)engineWebContentsGone;
@@ -550,6 +555,38 @@ class JavaScriptResultCompletion {
 - (BOOL)forwardRendererEditShortcutIfNeeded:(NSEvent*)event;
 - (BOOL)containsEventLocation:(NSEvent*)event;
 - (void)applySuppressionState;
+- (void)engineViewportResizeDidCommit:
+            (uint64_t)operation
+                           acknowledgement:
+                               (std::optional<content::ViewportResizeAck>)ack;
+- (void)engineViewportResizeDidPresent:
+            (uint64_t)operation
+                            acknowledgement:
+                                (std::optional<content::ViewportResizeAck>)ack;
+- (void)dispatchViewportResizeRequest:
+    (LimitlessViewportResizeRequest*)request;
+- (void)armViewportResizeWatchdogForOperation:(uint64_t)operation
+                                   generation:(uint64_t)generation;
+@end
+
+@interface LimitlessViewportResizeRequest : NSObject {
+  NSSize _size;
+  uint64_t _generation;
+  BOOL _terminal;
+  LimitlessViewportResizeCompletion _completion;
+}
+@property(nonatomic) NSSize size;
+@property(nonatomic) uint64_t generation;
+@property(nonatomic) BOOL terminal;
+@property(nonatomic, copy, nullable)
+    LimitlessViewportResizeCompletion completion;
+@end
+
+@implementation LimitlessViewportResizeRequest
+@synthesize size = _size;
+@synthesize generation = _generation;
+@synthesize terminal = _terminal;
+@synthesize completion = _completion;
 @end
 
 // Menu target for the "Set as Default Browser…" item in the app menu.
@@ -570,6 +607,39 @@ class JavaScriptResultCompletion {
 // Per-view WebContents observer → delegate events
 
 namespace limitless {
+
+class ViewportResizeCallbackBridge {
+ public:
+  explicit ViewportResizeCallbackBridge(LimitlessBrowserView* view)
+      : view_(view) {}
+
+  base::WeakPtr<ViewportResizeCallbackBridge> GetWeakPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
+
+  void OnCommit(uint64_t operation,
+                std::optional<content::ViewportResizeAck> acknowledgement) {
+    LimitlessBrowserView* view = view_;
+    if (view) {
+      [view engineViewportResizeDidCommit:operation
+                          acknowledgement:std::move(acknowledgement)];
+    }
+  }
+
+  void OnPresentation(
+      uint64_t operation,
+      std::optional<content::ViewportResizeAck> acknowledgement) {
+    LimitlessBrowserView* view = view_;
+    if (view) {
+      [view engineViewportResizeDidPresent:operation
+                           acknowledgement:std::move(acknowledgement)];
+    }
+  }
+
+ private:
+  __weak LimitlessBrowserView* view_;
+  base::WeakPtrFactory<ViewportResizeCallbackBridge> weak_factory_{this};
+};
 
 bool RouteChromeShortcut(NSEvent* event) {
   if (!event || ![LimitlessRoot canHandleShortcutEvent:event]) {
@@ -1040,6 +1110,19 @@ void PrepareLimitlessBrowserForDestruction(Browser* browser) {
 // ---------------------------------------------------------------------------
 // LimitlessBrowserView
 
+namespace {
+
+gfx::Size LimitlessViewportSizeInDIP(NSSize size) {
+  return gfx::Size(std::max(1, static_cast<int>(std::lround(size.width))),
+                   std::max(1, static_cast<int>(std::lround(size.height))));
+}
+
+bool LimitlessViewportSizesEqual(NSSize left, NSSize right) {
+  return LimitlessViewportSizeInDIP(left) == LimitlessViewportSizeInDIP(right);
+}
+
+}  // namespace
+
 @implementation LimitlessBrowserView {
   raw_ptr<content::WebContents> _webContents;  // Owned by the TabStripModel.
   std::unique_ptr<limitless::TabBridge> _bridge;
@@ -1049,6 +1132,17 @@ void PrepareLimitlessBrowserForDestruction(Browser* browser) {
   BOOL _webWindowVisible;
   BOOL _ignoresGlobalWebContentSuppression;
   int _browserIdentifier;
+  LimitlessViewportResizeRequest* _inFlightResize;
+  LimitlessViewportResizeRequest* _pendingResize;
+  LimitlessViewportResizeRequest* _awaitingPresentationResize;
+  std::unique_ptr<limitless::ViewportResizeCallbackBridge> _resizeCallbacks;
+  uint64_t _resizeOperation;
+  NSSize _lastCommittedViewportSize;
+  NSSize _lastPresentedViewportSize;
+  BOOL _hasLastCommittedViewportSize;
+  BOOL _hasLastPresentedViewportSize;
+  BOOL _resizeDegraded;
+  BOOL _viewportPresentationTransformActive;
 }
 
 @synthesize navDelegate = _navDelegate;
@@ -1065,12 +1159,15 @@ void PrepareLimitlessBrowserForDestruction(Browser* browser) {
     _currentTitle = @"";
     _webWindowVisible = YES;
     _browserIdentifier = g_next_browser_identifier++;
+    _resizeCallbacks =
+        std::make_unique<limitless::ViewportResizeCallbackBridge>(self);
     [AllViews() addObject:self];
   }
   return self;
 }
 
 - (void)dealloc {
+  [self cancelViewportResize];
   [AllViews() removeObject:self];
 }
 
@@ -1084,13 +1181,336 @@ void PrepareLimitlessBrowserForDestruction(Browser* browser) {
   [self maybeCreateTab];
 }
 
-- (void)commitViewportLayout {
-  self.needsLayout = YES;
-  [self layoutSubtreeIfNeeded];
+- (void)requestViewportSize:(NSSize)size
+                 generation:(uint64_t)generation
+                   terminal:(BOOL)terminal
+                 completion:(LimitlessViewportResizeCompletion)completion {
+  if (size.width <= 0 || size.height <= 0) {
+    if (completion) {
+      completion(generation, NO);
+    }
+    return;
+  }
+
+  LimitlessViewportResizeRequest* request =
+      [[LimitlessViewportResizeRequest alloc] init];
+  request.size = size;
+  request.generation = generation;
+  request.terminal = terminal;
+  request.completion = completion;
+
+  if (_awaitingPresentationResize) {
+    LimitlessViewportResizeRequest* obsolete = _awaitingPresentationResize;
+    _awaitingPresentationResize = nil;
+    ++_resizeOperation;
+    content::RenderWidgetHostView* render_view =
+        _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+    if (render_view) {
+      render_view->CancelViewportResizeObservation();
+    }
+    if (obsolete.completion) {
+      obsolete.completion(obsolete.generation, NO);
+    }
+  }
+
+  if (_inFlightResize) {
+    if (LimitlessViewportSizesEqual(_inFlightResize.size, size)) {
+      LimitlessViewportResizeRequest* obsolete_pending = _pendingResize;
+      _pendingResize = nil;
+      if (obsolete_pending.completion) {
+        obsolete_pending.completion(obsolete_pending.generation, NO);
+      }
+      if (!terminal) {
+        return;
+      }
+
+      const BOOL needs_presentation_callback = !_inFlightResize.terminal;
+      LimitlessViewportResizeCompletion obsolete_completion =
+          _inFlightResize.completion;
+      const uint64_t obsolete_generation = _inFlightResize.generation;
+      _inFlightResize.generation = generation;
+      _inFlightResize.terminal = YES;
+      _inFlightResize.completion = completion;
+      if (obsolete_completion) {
+        obsolete_completion(obsolete_generation, NO);
+      }
+
+      if (needs_presentation_callback) {
+        content::RenderWidgetHostView* render_view =
+            _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+        const uint64_t operation = _resizeOperation;
+        if (!render_view ||
+            !render_view->RequestSuccessfulPresentationForViewport(
+                LimitlessViewportSizeInDIP(size),
+                base::BindOnce(
+                    &limitless::ViewportResizeCallbackBridge::OnPresentation,
+                    _resizeCallbacks->GetWeakPtr(), operation))) {
+          [self cancelViewportResize];
+          return;
+        }
+      }
+      [self armViewportResizeWatchdogForOperation:_resizeOperation
+                                       generation:generation];
+      return;
+    }
+
+    LimitlessViewportResizeRequest* obsolete = _pendingResize;
+    _pendingResize = request;
+    if (obsolete.completion) {
+      obsolete.completion(obsolete.generation, NO);
+    }
+    return;
+  }
+
+  if (terminal && _hasLastPresentedViewportSize &&
+      LimitlessViewportSizesEqual(_lastPresentedViewportSize, size)) {
+    if (completion) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        completion(generation, YES);
+      });
+    }
+    return;
+  }
+
+  if (_hasLastCommittedViewportSize &&
+      LimitlessViewportSizesEqual(_lastCommittedViewportSize, size)) {
+    if (!terminal) {
+      return;
+    }
+
+    content::RenderWidgetHostView* render_view =
+        _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+    ++_resizeOperation;
+    const uint64_t operation = _resizeOperation;
+    _awaitingPresentationResize = request;
+    _resizeDegraded = NO;
+    if (!render_view) {
+      [self cancelViewportResize];
+      return;
+    }
+    render_view->SetShouldUseDefaultDeadlineOnResize(true);
+    if (!render_view->RequestSuccessfulPresentationForViewport(
+            LimitlessViewportSizeInDIP(size),
+            base::BindOnce(
+                &limitless::ViewportResizeCallbackBridge::OnPresentation,
+                _resizeCallbacks->GetWeakPtr(), operation))) {
+      [self cancelViewportResize];
+      return;
+    }
+    [self armViewportResizeWatchdogForOperation:operation
+                                     generation:generation];
+    return;
+  }
+
+  [self dispatchViewportResizeRequest:request];
+}
+
+- (void)dispatchViewportResizeRequest:
+    (LimitlessViewportResizeRequest*)request {
+  content::RenderWidgetHostView* render_view =
+      _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+  if (!render_view) {
+    if (request.completion) {
+      request.completion(request.generation, NO);
+    }
+    return;
+  }
+
+  _inFlightResize = request;
+  _resizeDegraded = NO;
+  ++_resizeOperation;
+  const uint64_t operation = _resizeOperation;
+  const gfx::Size size_in_dip = LimitlessViewportSizeInDIP(request.size);
+
+  // Advance Chromium's logical coordinate space while the outer
+  // LimitlessBrowserView remains presentation-held. Its frame-to-bounds
+  // transform keeps the last committed pixels filling the wrapper, while
+  // WebContents and input conversion operate at the desired viewport.
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  _webView.frame = NSMakeRect(0, 0, request.size.width, request.size.height);
+  _webView.bounds = NSMakeRect(0, 0, request.size.width, request.size.height);
+  [CATransaction commit];
+
+  render_view->SetShouldUseDefaultDeadlineOnResize(true);
+  render_view->SetSize(size_in_dip);
+  content::ViewportResizeCallback presentation_callback;
+  if (request.terminal) {
+    presentation_callback = base::BindOnce(
+        &limitless::ViewportResizeCallbackBridge::OnPresentation,
+        _resizeCallbacks->GetWeakPtr(), operation);
+  }
+  if (!render_view->ObserveViewportResize(
+          size_in_dip,
+          base::BindOnce(
+              &limitless::ViewportResizeCallbackBridge::OnCommit,
+              _resizeCallbacks->GetWeakPtr(), operation),
+          std::move(presentation_callback))) {
+    [self cancelViewportResize];
+    return;
+  }
+
+  if (request.terminal) {
+    [self armViewportResizeWatchdogForOperation:operation
+                                     generation:request.generation];
+  }
+}
+
+- (BOOL)viewportResizeAcknowledgement:
+            (const content::ViewportResizeAck&)acknowledgement
+                         matchesSize:(NSSize)size {
+  content::RenderWidgetHostView* render_view =
+      _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+  if (!render_view || !acknowledgement.local_surface_id.is_valid()) {
+    return NO;
+  }
+  const gfx::Size expected_pixels = gfx::ToRoundedSize(
+      gfx::ConvertSizeToPixels(LimitlessViewportSizeInDIP(size),
+                               render_view->GetDeviceScaleFactor()));
+  return acknowledgement.viewport_size_in_pixels == expected_pixels &&
+         acknowledgement.device_scale_factor ==
+             render_view->GetDeviceScaleFactor();
+}
+
+- (void)engineViewportResizeDidCommit:
+            (uint64_t)operation
+                           acknowledgement:
+                               (std::optional<content::ViewportResizeAck>)ack {
+  if (operation != _resizeOperation || !_inFlightResize) {
+    return;
+  }
+  if (!ack || ![self viewportResizeAcknowledgement:*ack
+                                         matchesSize:_inFlightResize.size]) {
+    NSLog(@"LIMITLESS_RESIZE renderer commit cancelled or mismatched");
+    [self cancelViewportResize];
+    return;
+  }
+
+  LimitlessViewportResizeRequest* committed = _inFlightResize;
+  _inFlightResize = nil;
+  _lastCommittedViewportSize = committed.size;
+  _hasLastCommittedViewportSize = YES;
+
+  if (_pendingResize) {
+    LimitlessViewportResizeRequest* pending = _pendingResize;
+    _pendingResize = nil;
+    if (committed.completion) {
+      committed.completion(committed.generation, NO);
+    }
+    [self dispatchViewportResizeRequest:pending];
+    return;
+  }
+
+  if (committed.terminal) {
+    _awaitingPresentationResize = committed;
+  }
+}
+
+- (void)engineViewportResizeDidPresent:
+            (uint64_t)operation
+                            acknowledgement:
+                                (std::optional<content::ViewportResizeAck>)ack {
+  if (operation != _resizeOperation || !_awaitingPresentationResize) {
+    return;
+  }
+  LimitlessViewportResizeRequest* request = _awaitingPresentationResize;
+  if (!ack || ![self viewportResizeAcknowledgement:*ack
+                                         matchesSize:request.size]) {
+    NSLog(@"LIMITLESS_RESIZE presentation cancelled or mismatched");
+    [self cancelViewportResize];
+    return;
+  }
+
+  _awaitingPresentationResize = nil;
+  _lastPresentedViewportSize = request.size;
+  _hasLastPresentedViewportSize = YES;
+  _resizeDegraded = NO;
+  content::RenderWidgetHostView* render_view =
+      _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+  if (render_view) {
+    render_view->SetShouldUseDefaultDeadlineOnResize(false);
+  }
+  if (request.completion) {
+    request.completion(request.generation, YES);
+  }
+}
+
+- (void)armViewportResizeWatchdogForOperation:(uint64_t)operation
+                                   generation:(uint64_t)generation {
+  __weak LimitlessBrowserView* weak_self = self;
+  dispatch_after(
+      dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(2 * NSEC_PER_SEC)),
+      dispatch_get_main_queue(), ^{
+        LimitlessBrowserView* strong_self = weak_self;
+        if (!strong_self || strong_self->_resizeOperation != operation) {
+          return;
+        }
+        LimitlessViewportResizeRequest* request =
+            strong_self->_awaitingPresentationResize
+                ?: strong_self->_inFlightResize;
+        if (!request || !request.terminal || request.generation != generation) {
+          return;
+        }
+        strong_self->_resizeDegraded = YES;
+        NSLog(@"LIMITLESS_RESIZE terminal presentation watchdog generation=%llu "
+               "viewport=%.0fx%.0f",
+              generation, request.size.width, request.size.height);
+      });
+}
+
+- (void)presentCommittedViewportSize:(NSSize)size {
+  if (!_webView || size.width <= 0 || size.height <= 0) {
+    return;
+  }
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  _webView.frame = NSMakeRect(0, 0, size.width, size.height);
+  _webView.bounds = NSMakeRect(0, 0, size.width, size.height);
+  [CATransaction commit];
+}
+
+- (void)setViewportPresentationTransformActive:(BOOL)active {
+  _viewportPresentationTransformActive = active;
+  content::RenderWidgetHostView* render_view =
+      _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+  if (render_view) {
+    render_view->SetViewportPresentationTransformActive(active);
+  }
+}
+
+- (void)cancelViewportResize {
+  LimitlessViewportResizeRequest* in_flight = _inFlightResize;
+  LimitlessViewportResizeRequest* pending = _pendingResize;
+  LimitlessViewportResizeRequest* awaiting =
+      _awaitingPresentationResize;
+  _inFlightResize = nil;
+  _pendingResize = nil;
+  _awaitingPresentationResize = nil;
+  _resizeDegraded = NO;
+  ++_resizeOperation;
+
+  content::RenderWidgetHostView* render_view =
+      _webContents ? _webContents->GetRenderWidgetHostView() : nullptr;
+  if (render_view) {
+    render_view->CancelViewportResizeObservation();
+    render_view->SetShouldUseDefaultDeadlineOnResize(false);
+  }
   if (_webView) {
-    _webView.frame = self.bounds;
-    _webView.needsLayout = YES;
-    [_webView layoutSubtreeIfNeeded];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _webView.bounds = NSMakeRect(0, 0, NSWidth(_webView.frame),
+                                NSHeight(_webView.frame));
+    [CATransaction commit];
+  }
+
+  if (in_flight.completion) {
+    in_flight.completion(in_flight.generation, NO);
+  }
+  if (pending.completion) {
+    pending.completion(pending.generation, NO);
+  }
+  if (awaiting.completion) {
+    awaiting.completion(awaiting.generation, NO);
   }
 }
 
@@ -1150,8 +1570,16 @@ void PrepareLimitlessBrowserForDestruction(Browser* browser) {
   NSView* webView = webContents->GetNativeView().GetNativeNSView();
   _webView = webView;
   webView.frame = self.bounds;
-  webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  webView.autoresizingMask = NSViewNotSizable;
   [self addSubview:webView];
+  _lastCommittedViewportSize = self.bounds.size;
+  _hasLastCommittedViewportSize = !NSIsEmptyRect(self.bounds);
+  content::RenderWidgetHostView* render_view =
+      webContents->GetRenderWidgetHostView();
+  if (render_view) {
+    render_view->SetViewportPresentationTransformActive(
+        _viewportPresentationTransformActive);
+  }
   [self applySuppressionState];
   if (!self.isHidden && _webWindowVisible) {
     [self focusBrowser];
@@ -1159,6 +1587,7 @@ void PrepareLimitlessBrowserForDestruction(Browser* browser) {
 }
 
 - (void)engineWebContentsGone {
+  [self cancelViewportResize];
   if (_webContents) {
     ViewMap().erase(_webContents);
     _webContents = nullptr;

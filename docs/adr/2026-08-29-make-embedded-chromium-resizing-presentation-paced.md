@@ -148,9 +148,15 @@ a backlog or blocking native chrome movement.
 
 Until Chromium successfully presents the latest terminal generation, Limitless
 will keep the hosted view's last complete presentation visible and use
-compositor-only positioning, clipping, and bounded scaling to cover the current
-browser card. Chromium continues to select the actual delegated fallback
-surface. Limitless does not cache, copy, or advance a Chromium surface itself.
+coordinate-correct AppKit positioning, clipping, and bounded scaling to cover
+the current browser card. The temporary geometry consists of paired
+frame-to-bounds transforms: the viewport host scales the last presented card
+into the desired container, while each visible `LimitlessBrowserView` applies
+the inverse mapping from the desired logical viewport into its held frame. The
+inner native `WebContents` frame and bounds advance to the desired logical size,
+so Chromium can resize without exposing an incomplete surface. Chromium
+continues to select the actual delegated fallback surface. Limitless does not
+cache, copy, or advance a Chromium surface itself.
 
 When live resize ends, the coordinator marks the newest desired target as
 terminal and enters `awaitingPresentation`. If an earlier resize is still in
@@ -188,9 +194,13 @@ removed.
 
 Replace `commitViewportLayout` with an asynchronous bridge contract that accepts
 a desired size, generation, and terminal flag. Setting the wrapper and native
-child bounds will occur with implicit Core Animation actions disabled, but it
-will not call `layoutSubtreeIfNeeded` from a SwiftUI update, AppKit resize
-callback, or transition-completion callback.
+child frame and bounds will occur with implicit Core Animation actions disabled,
+but it will not call `layoutSubtreeIfNeeded` from a SwiftUI update, AppKit
+resize callback, or transition-completion callback. Advancing only
+`RenderWidgetHostViewMac::SetSize` is insufficient for an embedded top-level
+view because the Cocoa child is normally sized from the native `WebContents`
+container. The bridge therefore advances that container's logical frame and
+bounds as part of the same request.
 
 The bounds change will flow through the existing `RenderWidgetHostViewMac`,
 `BrowserCompositorMac`, and `DelegatedFrameHost` path. The bridge will enable
@@ -233,18 +243,38 @@ The current external `CALayer.sublayerTransform` changes pixels without changing
 Chromium event or accessibility coordinates. It will not remain as an
 unqualified rendering-only transform.
 
-The preferred implementation will apply temporary scaling and translation in a
-Chromium-owned `ui::Layer` presentation wrapper, or expose an equivalent
-`RenderWidgetHostViewMac` presentation transform whose matrix is also used by
-point conversion and accessibility bounds. Rendering, clipping, hit testing,
-IME placement, drag coordinates, context menus, and accessibility actions must
-all use the same effective transform.
+The selected implementation uses AppKit frame-to-bounds transforms because
+they participate in native point conversion, accessibility geometry, and child
+layout. During a hold, the hierarchy is coordinated as follows:
 
-If a coordinate-correct transform is temporarily unavailable, the bridge must
-explicitly suppress pointer, gesture, drag, and accessibility actions while a
-non-identity presentation transform is active. Silently dispatching input using
-stale native geometry is not an acceptable fallback. The suppression fallback
-cannot be the default-enabled implementation.
+1. The viewport host has the desired container frame and the last presented
+   container bounds. This scales the complete old browser-card presentation to
+   follow native chrome.
+2. Each visible `LimitlessBrowserView` retains its last presented frame and has
+   bounds equal to its desired logical pane size. This is the inverse transform
+   that keeps the inner `WebContents` in desired logical coordinates.
+3. The inner native `WebContents` frame and bounds advance to the desired pane
+   size, allowing its `RenderWidgetHostViewCocoa` child and renderer viewport to
+   resize behind the held presentation.
+4. `RenderWidgetHostViewCocoa` receives the desired local logical size
+   explicitly while presentation mode is active. Its bounds feedback preserves
+   that local size while normal AppKit conversion supplies the transformed
+   window origin. This prevents an ancestor presentation scale from being fed
+   back as another renderer resize.
+
+The paired transforms cancel for coordinate conversion, so rendering, clipping,
+hit testing, IME placement, drag coordinates, context menus, and accessibility
+actions use the same desired logical viewport. After successful terminal
+presentation, the coordinator makes every frame and bounds pair equal to the
+desired geometry and disables presentation mode in one Core Animation
+transaction.
+
+If this coordinate-correct path becomes unavailable on a future Chromium or
+macOS revision, the bridge must explicitly suppress pointer, gesture, drag, and
+accessibility actions while a non-identity presentation transform is active.
+Silently dispatching input using stale native geometry is not an acceptable
+fallback. The suppression fallback cannot be the default-enabled
+implementation.
 
 Only visible `WebContents` participate in resize pacing. Hidden tabs retain
 their previous size and synchronize when selected, preserving the existing
@@ -307,6 +337,10 @@ the hardware supports them. The thresholds are:
   placement, and accessibility bounds target the pixels displayed during a
   non-identity presentation transform. A deliberately lengthened test
   transition will exercise these paths.
+- During a held transition, the renderer viewport reaches the desired terminal
+  size even though the outer browser frame still represents the last presented
+  geometry. The native `WebContents` frame and bounds, the
+  `RenderWidgetHostViewCocoa` local bounds, and page `innerWidth` must agree.
 - No synchronous `layoutSubtreeIfNeeded` call is reachable from the resize or
   transition path, and no Limitless-attributed browser UI task exceeds 50 ms on
   the deterministic fixtures.

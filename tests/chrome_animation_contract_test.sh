@@ -55,12 +55,22 @@ assert_contains 'let _ = chromeTransitions.activeTransition' \
   "$overlay/RootView.swift"
 assert_contains 'final class WebContentsResizeCoordinator' \
   "$overlay/WebContentsResizeCoordinator.swift"
-assert_contains 'for subview in browserSubviews where !subview.isHidden' \
+assert_contains 'let targets = browserSubviews.compactMap' \
   "$overlay/WebContainerView.swift"
-assert_contains 'view.commitViewportLayout()' "$overlay/WebContainerView.swift"
+assert_contains 'resizeCoordinator.updateTargets(' "$overlay/WebContainerView.swift"
+assert_contains 'requestViewportSize(' "$overlay/WebContentsResizeCoordinator.swift"
+assert_contains 'setViewportPresentationTransformActive(true)' \
+  "$overlay/WebContentsResizeCoordinator.swift"
+assert_contains '_pendingResize = request;' "$overlay/limitless_chrome_bridge.mm"
+assert_contains 'render_view->ObserveViewportResize(' \
+  "$overlay/limitless_chrome_bridge.mm"
+assert_absent 'commitViewportLayout' "$overlay/WebContainerView.swift"
+assert_absent 'layoutSubtreeIfNeeded' "$overlay/limitless_chrome_bridge.mm"
 
 assert_contains 'limitless/ChromeTransitionDriver.swift' "$integration_patch"
 assert_contains 'limitless/WebContentsResizeCoordinator.swift' "$integration_patch"
+assert_contains 'ObserveViewportResize(' "$integration_patch"
+assert_contains 'setViewportLogicalSize:' "$integration_patch"
 assert_contains 'QuartzCore.framework' "$integration_patch"
 assert_contains 'ScreenCaptureKit.framework' "$integration_patch"
 assert_contains 'SCScreenshotManager.captureImage' "$overlay/Screenshot.swift"

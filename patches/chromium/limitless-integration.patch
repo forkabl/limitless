@@ -434,3 +434,606 @@ index 0f6b2d9113..3a472d630d 100644
    footer_controller_observation_.Observe(footer_controller);
  #endif  // !BUILDFLAG(IS_ANDROID)
  }
+diff --git a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h
+index 0f30e4d87c..a5116012fb 100644
+--- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h
++++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h
+@@ -69,6 +69,10 @@ CONTENT_EXPORT
+ 
+ - (void)setCanBeKeyView:(BOOL)can;
+ - (void)setCloseOnDeactivate:(BOOL)b;
++// Keep viewport sizing in local coordinates while an ancestor view applies a
++// temporary frame-to-bounds presentation transform.
++- (void)setViewportPresentationTransformActive:(BOOL)active;
++- (void)setViewportLogicalSize:(NSSize)size;
+ // Indicate that the host was destroyed and can't be called back into.
+ - (void)setHostDisconnected;
+ // Cancel ongoing composition (abandon the marked text).
+diff --git a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
+index bdc30e36d4..67fc7d4bd3 100644
+--- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
++++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
+@@ -217,6 +217,8 @@ void ExtractUnderlines(NSAttributedString* string,
+ @end
+ 
+ @implementation RenderWidgetHostViewCocoa {
++  BOOL _viewportPresentationTransformActive;
++
+   // Dummy host and host helper that are always valid (see comments below about
+   // _host).
+   // These need to be declared before |_host| and |_hostHelper| so that it
+@@ -435,12 +437,32 @@ static NSWindow* __weak _deferredResignKeyWindow;
+   }
+ 
+   NSRect viewBoundsInWindow = [self convertRect:viewBoundsInView toView:nil];
++  if (_viewportPresentationTransformActive) {
++    viewBoundsInWindow.size = viewBoundsInView.size;
++  }
+   gfx::Rect gfxViewBoundsInWindow(viewBoundsInWindow);
+   gfxViewBoundsInWindow.set_y(NSHeight([enclosingWindow frame]) -
+                               NSMaxY(viewBoundsInWindow));
+   _host->OnBoundsInWindowChanged(gfxViewBoundsInWindow, true);
+ }
+ 
++- (void)setViewportPresentationTransformActive:(BOOL)active {
++  if (_viewportPresentationTransformActive == active) {
++    return;
++  }
++  _viewportPresentationTransformActive = active;
++  [self sendViewBoundsInWindowToHost];
++}
++
++- (void)setViewportLogicalSize:(NSSize)size {
++  if (!_viewportPresentationTransformActive || size.width <= 0 ||
++      size.height <= 0) {
++    return;
++  }
++  [super setBounds:NSMakeRect(0, 0, size.width, size.height)];
++  [self sendViewBoundsInWindowToHost];
++}
++
+ - (NSSpellChecker*)spellChecker {
+   if (_spellCheckerForTesting)
+     return _spellCheckerForTesting;
+diff --git a/content/browser/renderer_host/render_widget_host_view_base.cc b/content/browser/renderer_host/render_widget_host_view_base.cc
+index 39ac5fd0e4..8783558aae 100644
+--- a/content/browser/renderer_host/render_widget_host_view_base.cc
++++ b/content/browser/renderer_host/render_widget_host_view_base.cc
+@@ -656,6 +656,24 @@ void RenderWidgetHostViewBase::SetShouldUseDefaultDeadlineOnResize(
+   NOTIMPLEMENTED() << "Not supported on platform";
+ }
+ 
++void RenderWidgetHostViewBase::SetViewportPresentationTransformActive(
++    bool active) {}
++
++bool RenderWidgetHostViewBase::ObserveViewportResize(
++    const gfx::Size& expected_size_in_dip,
++    ViewportResizeCallback commit_callback,
++    ViewportResizeCallback presentation_callback) {
++  return false;
++}
++
++bool RenderWidgetHostViewBase::RequestSuccessfulPresentationForViewport(
++    const gfx::Size& expected_size_in_dip,
++    ViewportResizeCallback presentation_callback) {
++  return false;
++}
++
++void RenderWidgetHostViewBase::CancelViewportResizeObservation() {}
++
+ float RenderWidgetHostViewBase::GetDeviceScaleFactor() const {
+   return GetScreenInfos().current().device_scale_factor;
+ }
+diff --git a/content/browser/renderer_host/render_widget_host_view_base.h b/content/browser/renderer_host/render_widget_host_view_base.h
+index 4e698516bb..9fcded2cb3 100644
+--- a/content/browser/renderer_host/render_widget_host_view_base.h
++++ b/content/browser/renderer_host/render_widget_host_view_base.h
+@@ -139,6 +139,15 @@ class CONTENT_EXPORT RenderWidgetHostViewBase
+   display::ScreenInfos GetScreenInfos() const override;
+   virtual void ResetGestureDetection();
+   void SetShouldUseDefaultDeadlineOnResize(bool enable) override;
++  void SetViewportPresentationTransformActive(bool active) override;
++  bool ObserveViewportResize(
++      const gfx::Size& expected_size_in_dip,
++      ViewportResizeCallback commit_callback,
++      ViewportResizeCallback presentation_callback) override;
++  bool RequestSuccessfulPresentationForViewport(
++      const gfx::Size& expected_size_in_dip,
++      ViewportResizeCallback presentation_callback) override;
++  void CancelViewportResizeObservation() override;
+ 
+   // RenderWidgetHostViewInput implementation
+   base::WeakPtr<input::RenderWidgetHostViewInput> GetInputWeakPtr() override;
+diff --git a/content/browser/renderer_host/render_widget_host_view_mac.h b/content/browser/renderer_host/render_widget_host_view_mac.h
+index b4c218b9ec..306de0826a 100644
+--- a/content/browser/renderer_host/render_widget_host_view_mac.h
++++ b/content/browser/renderer_host/render_widget_host_view_mac.h
+@@ -54,6 +54,10 @@ namespace input {
+ class CursorManager;
+ }  // namespace input
+ 
++namespace viz {
++class FrameTimingDetails;
++}  // namespace viz
++
+ @protocol RenderWidgetHostViewMacDelegate;
+ 
+ @class NSAccessibilityRemoteUIElement;
+@@ -150,6 +154,15 @@ class CONTENT_EXPORT RenderWidgetHostViewMac
+   bool IsHTMLFormPopup() const override;
+   uint64_t GetNSViewId() const override;
+   void SetShouldUseDefaultDeadlineOnResize(bool enable) override;
++  void SetViewportPresentationTransformActive(bool active) override;
++  bool ObserveViewportResize(
++      const gfx::Size& expected_size_in_dip,
++      ViewportResizeCallback commit_callback,
++      ViewportResizeCallback presentation_callback) override;
++  bool RequestSuccessfulPresentationForViewport(
++      const gfx::Size& expected_size_in_dip,
++      ViewportResizeCallback presentation_callback) override;
++  void CancelViewportResizeObservation() override;
+ 
+   // Implementation of RenderWidgetHostViewBase.
+   void InitAsPopup(RenderWidgetHostView* parent_host_view,
+@@ -273,7 +286,7 @@ class CONTENT_EXPORT RenderWidgetHostViewMac
+ 
+   // RenderFrameMetadataProvider::Observer
+   void OnRenderFrameMetadataChangedBeforeActivation(
+-      const cc::RenderFrameMetadata& metadata) override {}
++      const cc::RenderFrameMetadata& metadata) override;
+   void OnRenderFrameMetadataChangedAfterActivation(
+       base::TimeTicks activation_time) override;
+   void OnRenderFrameSubmission() override {}
+@@ -554,6 +567,26 @@ class CONTENT_EXPORT RenderWidgetHostViewMac
+   void OnDidUpdateVisualPropertiesComplete(
+       const cc::RenderFrameMetadata& metadata);
+ 
++  struct ViewportResizeObservation {
++    gfx::Size expected_size_in_dip;
++    gfx::Size expected_size_in_pixels;
++    ViewportResizeCallback commit_callback;
++    ViewportResizeCallback presentation_callback;
++    std::optional<ViewportResizeAck> activated_ack;
++    bool presentation_requested = false;
++  };
++
++  gfx::Size ViewportSizeInPixels(const gfx::Size& size_in_dip) const;
++  bool MetadataMatchesViewportResize(
++      const cc::RenderFrameMetadata& metadata) const;
++  void MaybeAcknowledgeViewportResizeCommit(
++      const cc::RenderFrameMetadata& metadata);
++  void MaybeRequestViewportPresentation(
++      const cc::RenderFrameMetadata& metadata);
++  void OnViewportPresented(
++      ViewportResizeAck acknowledgement,
++      const viz::FrameTimingDetails& frame_timing_details);
++
+   void OnGotStringForDictionaryOverlay(
+       int32_t targetWidgetProcessId,
+       int32_t targetWidgetRoutingId,
+@@ -738,6 +771,9 @@ class CONTENT_EXPORT RenderWidgetHostViewMac
+   const uint64_t ns_view_id_;
+ 
+   bool use_default_deadline_on_resize_ = false;
++  bool viewport_presentation_transform_active_ = false;
++
++  std::optional<ViewportResizeObservation> viewport_resize_observation_;
+ 
+   // See description of `kDelayUpdateWindowsAfterTextInputStateChanged` for
+   // details.
+diff --git a/content/browser/renderer_host/render_widget_host_view_mac.mm b/content/browser/renderer_host/render_widget_host_view_mac.mm
+index 319b54e28f..30c39a5f1a 100644
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -38,6 +38,7 @@
+ #include "components/input/web_input_event_builders_mac.h"
+ #include "components/remote_cocoa/browser/ns_view_ids.h"
+ #include "components/remote_cocoa/common/application.mojom.h"
++#include "components/viz/common/frame_timing_details.h"
+ #include "components/viz/common/features.h"
+ #include "components/viz/common/switches.h"
+ #import "content/app_shim_remote_cocoa/render_widget_host_ns_view_bridge.h"
+@@ -82,6 +83,7 @@
+ #include "ui/events/gesture_detection/gesture_provider_config_helper.h"
+ #include "ui/events/keycodes/dom/dom_code.h"
+ #include "ui/events/keycodes/dom/dom_keyboard_layout_map.h"
++#include "ui/compositor/compositor.h"
+ #include "ui/gfx/geometry/dip_util.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/mac/coordinate_conversion.h"
+@@ -597,6 +599,10 @@ void RenderWidgetHostViewMac::SetSize(const gfx::Size& size) {
+   gfx::Rect rect = GetViewBounds();
+   rect.set_size(size);
+   SetBounds(rect);
++  if (viewport_presentation_transform_active_) {
++    [GetInProcessNSView()
++        setViewportLogicalSize:NSMakeSize(size.width(), size.height())];
++  }
+ }
+ 
+ void RenderWidgetHostViewMac::SetBounds(const gfx::Rect& rect) {
+@@ -853,6 +859,15 @@ void RenderWidgetHostViewMac::OnRenderFrameMetadataChangedAfterActivation(
+                                           ->render_frame_metadata_provider()
+                                           ->LastRenderFrameMetadata()
+                                           .root_background_color.toSkColor();
++  const cc::RenderFrameMetadata& metadata =
++      host()->render_frame_metadata_provider()->LastRenderFrameMetadata();
++  MaybeAcknowledgeViewportResizeCommit(metadata);
++  MaybeRequestViewportPresentation(metadata);
++}
++
++void RenderWidgetHostViewMac::OnRenderFrameMetadataChangedBeforeActivation(
++    const cc::RenderFrameMetadata& metadata) {
++  MaybeAcknowledgeViewportResizeCommit(metadata);
+ }
+ 
+ void RenderWidgetHostViewMac::RenderProcessGone() {
+@@ -860,6 +875,7 @@ void RenderWidgetHostViewMac::RenderProcessGone() {
+ }
+ 
+ void RenderWidgetHostViewMac::Destroy() {
++  CancelViewportResizeObservation();
+   host()->render_frame_metadata_provider()->RemoveObserver(this);
+ 
+   // Unlock the mouse in the NSView's process before destroying our bridge to
+@@ -951,6 +967,14 @@ void RenderWidgetHostViewMac::UpdateScreenInfo() {
+   any_display_changed |= was_updated.first;
+   current_display_changed |= was_updated.second;
+ 
++  if (viewport_resize_observation_ && current_display_changed) {
++    viewport_resize_observation_->expected_size_in_pixels =
++        ViewportSizeInPixels(
++            viewport_resize_observation_->expected_size_in_dip);
++    viewport_resize_observation_->activated_ack.reset();
++    viewport_resize_observation_->presentation_requested = false;
++  }
++
+   bool dip_size_changed = view_bounds_in_window_dip_.size() !=
+                           browser_compositor_->GetRendererSize();
+ 
+@@ -1182,6 +1206,165 @@ void RenderWidgetHostViewMac::SetShouldUseDefaultDeadlineOnResize(bool enable) {
+   use_default_deadline_on_resize_ = enable;
+ }
+ 
++void RenderWidgetHostViewMac::SetViewportPresentationTransformActive(
++    bool active) {
++  viewport_presentation_transform_active_ = active;
++  [GetInProcessNSView() setViewportPresentationTransformActive:active];
++}
++
++bool RenderWidgetHostViewMac::ObserveViewportResize(
++    const gfx::Size& expected_size_in_dip,
++    ViewportResizeCallback commit_callback,
++    ViewportResizeCallback presentation_callback) {
++  CancelViewportResizeObservation();
++  if (expected_size_in_dip.IsEmpty()) {
++    return false;
++  }
++
++  viewport_resize_observation_.emplace(
++      expected_size_in_dip, ViewportSizeInPixels(expected_size_in_dip),
++      std::move(commit_callback), std::move(presentation_callback),
++      std::nullopt, false);
++
++  const cc::RenderFrameMetadata& metadata =
++      host()->render_frame_metadata_provider()->LastRenderFrameMetadata();
++  MaybeAcknowledgeViewportResizeCommit(metadata);
++  MaybeRequestViewportPresentation(metadata);
++  return true;
++}
++
++bool RenderWidgetHostViewMac::RequestSuccessfulPresentationForViewport(
++    const gfx::Size& expected_size_in_dip,
++    ViewportResizeCallback presentation_callback) {
++  if (expected_size_in_dip.IsEmpty() || !presentation_callback) {
++    return false;
++  }
++
++  if (!viewport_resize_observation_ ||
++      viewport_resize_observation_->expected_size_in_dip !=
++          expected_size_in_dip) {
++    CancelViewportResizeObservation();
++    viewport_resize_observation_.emplace(
++        expected_size_in_dip, ViewportSizeInPixels(expected_size_in_dip),
++        ViewportResizeCallback(), std::move(presentation_callback),
++        std::nullopt, false);
++  } else {
++    ViewportResizeCallback superseded_callback =
++        std::move(viewport_resize_observation_->presentation_callback);
++    viewport_resize_observation_->presentation_callback =
++        std::move(presentation_callback);
++    viewport_resize_observation_->presentation_requested = false;
++    viewport_resize_observation_->activated_ack.reset();
++    if (superseded_callback) {
++      std::move(superseded_callback).Run(std::nullopt);
++    }
++  }
++
++  if (!viewport_resize_observation_ ||
++      viewport_resize_observation_->expected_size_in_dip !=
++          expected_size_in_dip) {
++    return false;
++  }
++
++  const cc::RenderFrameMetadata& metadata =
++      host()->render_frame_metadata_provider()->LastRenderFrameMetadata();
++  MaybeRequestViewportPresentation(metadata);
++  return true;
++}
++
++void RenderWidgetHostViewMac::CancelViewportResizeObservation() {
++  if (!viewport_resize_observation_) {
++    return;
++  }
++
++  ViewportResizeObservation observation =
++      std::move(*viewport_resize_observation_);
++  viewport_resize_observation_.reset();
++  if (observation.commit_callback) {
++    std::move(observation.commit_callback).Run(std::nullopt);
++  }
++  if (observation.presentation_callback) {
++    std::move(observation.presentation_callback).Run(std::nullopt);
++  }
++}
++
++gfx::Size RenderWidgetHostViewMac::ViewportSizeInPixels(
++    const gfx::Size& size_in_dip) const {
++  return gfx::ToRoundedSize(gfx::ConvertSizeToPixels(
++      size_in_dip, screen_infos_.current().device_scale_factor));
++}
++
++bool RenderWidgetHostViewMac::MetadataMatchesViewportResize(
++    const cc::RenderFrameMetadata& metadata) const {
++  return viewport_resize_observation_ && metadata.local_surface_id &&
++         metadata.local_surface_id->is_valid() &&
++         metadata.device_scale_factor ==
++             screen_infos_.current().device_scale_factor &&
++         metadata.viewport_size_in_pixels ==
++             viewport_resize_observation_->expected_size_in_pixels;
++}
++
++void RenderWidgetHostViewMac::MaybeAcknowledgeViewportResizeCommit(
++    const cc::RenderFrameMetadata& metadata) {
++  if (!MetadataMatchesViewportResize(metadata) ||
++      !viewport_resize_observation_->commit_callback) {
++    return;
++  }
++
++  ViewportResizeAck acknowledgement{
++      metadata.viewport_size_in_pixels, metadata.device_scale_factor,
++      *metadata.local_surface_id};
++  ViewportResizeCallback callback =
++      std::move(viewport_resize_observation_->commit_callback);
++  if (!viewport_resize_observation_->presentation_callback) {
++    viewport_resize_observation_.reset();
++  }
++  std::move(callback).Run(std::move(acknowledgement));
++}
++
++void RenderWidgetHostViewMac::MaybeRequestViewportPresentation(
++    const cc::RenderFrameMetadata& metadata) {
++  if (!MetadataMatchesViewportResize(metadata) ||
++      !viewport_resize_observation_->presentation_callback ||
++      viewport_resize_observation_->presentation_requested) {
++    return;
++  }
++
++  ui::Compositor* compositor = GetCompositor();
++  if (!compositor) {
++    CancelViewportResizeObservation();
++    return;
++  }
++
++  ViewportResizeAck acknowledgement{
++      metadata.viewport_size_in_pixels, metadata.device_scale_factor,
++      *metadata.local_surface_id};
++  viewport_resize_observation_->activated_ack = acknowledgement;
++  viewport_resize_observation_->presentation_requested = true;
++  compositor->RequestSuccessfulPresentationTimeForNextFrame(base::BindOnce(
++      &RenderWidgetHostViewMac::OnViewportPresented,
++      weak_factory_.GetWeakPtr(), acknowledgement));
++  compositor->ScheduleFullRedraw();
++}
++
++void RenderWidgetHostViewMac::OnViewportPresented(
++    ViewportResizeAck acknowledgement,
++    const viz::FrameTimingDetails& frame_timing_details) {
++  if (!viewport_resize_observation_ ||
++      !viewport_resize_observation_->activated_ack ||
++      viewport_resize_observation_->activated_ack->viewport_size_in_pixels !=
++          acknowledgement.viewport_size_in_pixels ||
++      viewport_resize_observation_->activated_ack->local_surface_id !=
++          acknowledgement.local_surface_id) {
++    return;
++  }
++
++  ViewportResizeCallback callback =
++      std::move(viewport_resize_observation_->presentation_callback);
++  viewport_resize_observation_.reset();
++  std::move(callback).Run(std::move(acknowledgement));
++}
++
+ bool RenderWidgetHostViewMac::GetLineBreakIndex(
+     const std::vector<gfx::Rect>& bounds,
+     const gfx::Range& range,
+diff --git a/content/browser/renderer_host/render_widget_host_view_mac_unittest.mm b/content/browser/renderer_host/render_widget_host_view_mac_unittest.mm
+index 2185bfb834..ca5206f419 100644
+--- a/content/browser/renderer_host/render_widget_host_view_mac_unittest.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac_unittest.mm
+@@ -24,6 +24,7 @@
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "base/test/bind.h"
+ #include "base/test/metrics/histogram_tester.h"
+ #include "base/test/scoped_feature_list.h"
+ #include "base/test/simple_test_tick_clock.h"
+@@ -68,7 +69,9 @@
+ #include "ui/events/blink/blink_features.h"
+ #include "ui/events/blink/web_input_event_traits.h"
+ #include "ui/events/test/cocoa_test_event_utils.h"
++#include "ui/gfx/geometry/dip_util.h"
+ #include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/mac/coordinate_conversion.h"
+ #include "ui/gfx/range/range.h"
+ #include "ui/latency/latency_info.h"
+@@ -687,6 +690,77 @@ INSTANTIATE_TEST_SUITE_P(OptimizeCachedFirstRect,
+ TEST_F(RenderWidgetHostViewMacTest, Basic) {
+ }
+ 
++TEST_F(RenderWidgetHostViewMacTest, ViewportResizeCommitMatchesExpectedSurface) {
++  const gfx::Size expected_size_in_dip(320, 200);
++  const float device_scale_factor = rwhv_mac_->GetDeviceScaleFactor();
++  const gfx::Size expected_size_in_pixels = gfx::ToRoundedSize(
++      gfx::ConvertSizeToPixels(expected_size_in_dip, device_scale_factor));
++  const viz::LocalSurfaceId local_surface_id =
++      rwhv_mac_->GetLocalSurfaceId();
++  ASSERT_TRUE(local_surface_id.is_valid());
++
++  bool callback_called = false;
++  EXPECT_TRUE(rwhv_mac_->ObserveViewportResize(
++      expected_size_in_dip,
++      base::BindLambdaForTesting(
++          [&](std::optional<ViewportResizeAck> acknowledgement) {
++            callback_called = true;
++            ASSERT_TRUE(acknowledgement);
++            EXPECT_EQ(acknowledgement->viewport_size_in_pixels,
++                      expected_size_in_pixels);
++            EXPECT_EQ(acknowledgement->device_scale_factor,
++                      device_scale_factor);
++            EXPECT_EQ(acknowledgement->local_surface_id, local_surface_id);
++          }),
++      ViewportResizeCallback()));
++
++  cc::RenderFrameMetadata metadata;
++  metadata.viewport_size_in_pixels = gfx::Size(
++      expected_size_in_pixels.width() + 1, expected_size_in_pixels.height());
++  metadata.device_scale_factor = device_scale_factor;
++  metadata.local_surface_id = local_surface_id;
++  rwhv_mac_->OnRenderFrameMetadataChangedBeforeActivation(metadata);
++  EXPECT_FALSE(callback_called);
++
++  metadata.viewport_size_in_pixels = expected_size_in_pixels;
++  rwhv_mac_->OnRenderFrameMetadataChangedBeforeActivation(metadata);
++  EXPECT_TRUE(callback_called);
++}
++
++TEST_F(RenderWidgetHostViewMacTest, CancellingViewportResizeResolvesCallbacks) {
++  int cancelled_callbacks = 0;
++  EXPECT_TRUE(rwhv_mac_->ObserveViewportResize(
++      gfx::Size(320, 200),
++      base::BindLambdaForTesting(
++          [&](std::optional<ViewportResizeAck> acknowledgement) {
++            EXPECT_FALSE(acknowledgement);
++            ++cancelled_callbacks;
++          }),
++      base::BindLambdaForTesting(
++          [&](std::optional<ViewportResizeAck> acknowledgement) {
++            EXPECT_FALSE(acknowledgement);
++            ++cancelled_callbacks;
++          })));
++
++  rwhv_mac_->CancelViewportResizeObservation();
++  EXPECT_EQ(cancelled_callbacks, 2);
++}
++
++TEST_F(RenderWidgetHostViewMacTest,
++       PresentationTransformPreservesLocalViewportSize) {
++  NSView* transformed_parent =
++      [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300)];
++  transformed_parent.bounds = NSMakeRect(0, 0, 200, 150);
++  [window_.contentView addSubview:transformed_parent];
++  [rwhv_cocoa_ removeFromSuperview];
++  [transformed_parent addSubview:rwhv_cocoa_];
++
++  rwhv_mac_->SetViewportPresentationTransformActive(true);
++  rwhv_mac_->SetSize(gfx::Size(320, 200));
++
++  EXPECT_EQ(rwhv_mac_->GetViewBounds().size(), gfx::Size(320, 200));
++}
++
+ TEST_F(RenderWidgetHostViewMacTest, AcceptsFirstResponder) {
+   // The RWHVCocoa should normally accept first responder status.
+   EXPECT_TRUE(rwhv_cocoa_.acceptsFirstResponder);
+diff --git a/content/public/browser/render_widget_host_view.h b/content/public/browser/render_widget_host_view.h
+index 979451f755..4e8f71a6ab 100644
+--- a/content/public/browser/render_widget_host_view.h
++++ b/content/public/browser/render_widget_host_view.h
+@@ -10,8 +10,10 @@
+ 
+ #include "base/containers/flat_map.h"
+ #include "base/containers/flat_set.h"
++#include "base/functional/callback.h"
+ #include "base/types/expected.h"
+ #include "build/build_config.h"
++#include "components/viz/common/surfaces/local_surface_id.h"
+ #include "content/common/content_export.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ #include "third_party/blink/public/mojom/input/pointer_lock_result.mojom.h"
+@@ -19,6 +21,7 @@
+ #include "ui/base/ime/mojom/virtual_keyboard_types.mojom-forward.h"
+ #include "ui/display/screen_infos.h"
+ #include "ui/gfx/geometry/point_conversions.h"
++#include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/native_ui_types.h"
+ #include "ui/gfx/range/range.h"
+ 
+@@ -64,6 +67,21 @@ enum class CopyFromSurfaceError {
+ using CopyFromSurfaceResult =
+     base::expected<viz::CopyOutputBitmapWithMetadata, CopyFromSurfaceError>;
+ 
++// Identifies the renderer surface which committed or presented a coordinated
++// top-level viewport resize. The viewport size is expressed in physical pixels
++// so callers cannot confuse a same-DIP resize across displays with different
++// device scale factors.
++struct CONTENT_EXPORT ViewportResizeAck {
++  gfx::Size viewport_size_in_pixels;
++  float device_scale_factor = 1.f;
++  viz::LocalSurfaceId local_surface_id;
++};
++
++// A null result means the observation was cancelled because the view, renderer,
++// or a newer observation superseded it.
++using ViewportResizeCallback =
++    base::OnceCallback<void(std::optional<ViewportResizeAck>)>;
++
+ class RenderWidgetHost;
+ class TouchSelectionControllerClientManager;
+ 
+@@ -332,6 +350,34 @@ class CONTENT_EXPORT RenderWidgetHostView {
+   // Tells the View if it should use default deadline policy when resizing.
+   virtual void SetShouldUseDefaultDeadlineOnResize(bool enable) = 0;
+ 
++  // Keeps the renderer viewport in the view's local coordinate space while a
++  // native ancestor applies a temporary presentation transform. On supported
++  // platforms, native point conversion and accessibility continue to follow
++  // that transform without feeding its scaled window-space size back to the
++  // renderer.
++  virtual void SetViewportPresentationTransformActive(bool active) = 0;
++
++  // Observes one coordinated top-level viewport resize. `commit_callback` runs
++  // when matching renderer metadata arrives. `presentation_callback`, when
++  // supplied, runs only after that same surface activates and a browser
++  // compositor frame containing it is successfully presented. Returns false on
++  // platforms which do not implement this contract.
++  virtual bool ObserveViewportResize(
++      const gfx::Size& expected_size_in_dip,
++      ViewportResizeCallback commit_callback,
++      ViewportResizeCallback presentation_callback) = 0;
++
++  // Adds a presentation callback to an already observed or already committed
++  // matching size. This supports promoting the last live-resize request to the
++  // terminal request without manufacturing a no-op resize.
++  virtual bool RequestSuccessfulPresentationForViewport(
++      const gfx::Size& expected_size_in_dip,
++      ViewportResizeCallback presentation_callback) = 0;
++
++  // Cancels callbacks installed by the methods above. Implementations run all
++  // outstanding callbacks with a null result before returning.
++  virtual void CancelViewportResizeObservation() = 0;
++
+   // Forces a specified deadline for the next surface embedding. If the optional
+   // has a value, overrides the embedding deadline to the specified duration
+   // (unit: frames). If set to std::nullopt, clears any active override and

@@ -22,13 +22,12 @@ struct WebContainerView: NSViewRepresentable {
         let activeLoadFailed = activeTab.didFail
         nsView.applyCornerRadius(cornerRadius)
 
-        // Geometry-changing chrome holds Chromium at a stable native size and
-        // animates its parent layer. Split view changes its pane frames rather
-        // than the root viewport, so it is coordinated separately below.
-        let rootTransition = chromeTransitions.activeTransition?.kind == .splitView
-            ? nil : chromeTransitions.activeTransition
-        let geometryReleased = nsView.updateGeometryTransition(
-            rootTransition, manualResize: store.isResizingSidebar)
+        // Geometry-changing chrome holds Chromium at a stable presented size.
+        // The final native geometry is revealed only after Chromium confirms
+        // successful presentation for every visible pane.
+        nsView.updateGeometryTransition(
+            chromeTransitions.activeTransition,
+            manualResize: store.isResizingSidebar)
 
         // Settings - and an agent thread - render as a full page over the web
         // card, so hide Chromium while either is up. The launcher is hosted in
@@ -71,15 +70,6 @@ struct WebContainerView: NSViewRepresentable {
             }
             let visible = tab.id == store.selectedTabID || (splitID != nil && tab.id == splitID)
             let hidden = !visible || tab.didFail
-            // Hidden WebContents retain their last size. A tab synchronizes
-            // lazily when it becomes visible, and visible tabs synchronize once
-            // when a transition ends.
-            if visible && (!nsView.holdsGeometry || geometryReleased || view.frame.isEmpty) {
-                view.frame = nsView.frameForSubview(view)
-                if geometryReleased {
-                    view.commitViewportLayout()
-                }
-            }
             view.autoresizingMask = []
             view.isHidden = hidden
             view.setWebWindowVisible(!hidden)
@@ -89,6 +79,8 @@ struct WebContainerView: NSViewRepresentable {
             // must stay unthrottled so the agent's JS actions run reliably.
             view.setPageHidden(hidden && !agentForeground)
         }
+
+        nsView.synchronizeBrowserGeometry()
 
         // Keep the active browser keyboard-focused.
         if let active = store.selectedTab, active.hasRealized {
@@ -128,15 +120,7 @@ struct WebContainerView: NSViewRepresentable {
         let viewportHost = ViewportHost()
         private let resizeCoordinator = WebContentsResizeCoordinator()
 
-        /// When true, the hosted CEF subviews keep their current frame instead
-        /// of tracking `bounds` - set during a sidebar resize drag so the engine
-        /// isn't re-laid-out every frame. Also gates AppKit's mask-based
-        /// autoresizing so a parent frame change can't resize them behind us.
-        private var freezeSubviewLayout = false
-
-        var holdsGeometry: Bool {
-            freezeSubviewLayout || resizeCoordinator.isHoldingGeometry
-        }
+        var holdsGeometry: Bool { resizeCoordinator.isHoldingGeometry }
 
         var browserSubviews: [NSView] { viewportHost.subviews }
 
@@ -169,35 +153,43 @@ struct WebContainerView: NSViewRepresentable {
             viewportHost.addSubview(view)
         }
 
-        /// Returns true when held geometry was released and visible views need
-        /// one final engine resize.
         func updateGeometryTransition(_ transition: ActiveChromeTransition?,
-                                      manualResize: Bool) -> Bool {
-            let wasManuallyFrozen = freezeSubviewLayout
-            freezeSubviewLayout = manualResize
-
-            var released = resizeCoordinator.update(
+                                      manualResize: Bool) {
+            resizeCoordinator.updateChromeActivity(
                 transition: transition,
+                manualResize: manualResize,
                 viewportHost: viewportHost,
                 containerBounds: bounds)
-            if wasManuallyFrozen && !manualResize {
-                layoutViewport()
-                released = true
-            }
-            return released
         }
 
         func frameForSubview(_ view: NSView) -> NSRect {
-            guard let split = splitLayout else { return viewportHost.bounds }
-            let half = (viewportHost.bounds.width - Self.splitGap) / 2
+            let targetBounds = NSRect(origin: .zero, size: bounds.size)
+            guard let split = splitLayout else { return targetBounds }
+            let half = (targetBounds.width - Self.splitGap) / 2
             if view === split.left {
-                return NSRect(x: 0, y: 0, width: half, height: viewportHost.bounds.height)
+                return NSRect(x: 0, y: 0, width: half, height: targetBounds.height)
             }
             if view === split.right {
                 return NSRect(x: half + Self.splitGap, y: 0,
-                              width: half, height: viewportHost.bounds.height)
+                              width: half, height: targetBounds.height)
             }
-            return viewportHost.bounds
+            return targetBounds
+        }
+
+        func synchronizeBrowserGeometry() {
+            let targets = browserSubviews.compactMap { subview ->
+                WebContentsResizeCoordinator.Target? in
+                guard let browserView = subview as? LimitlessBrowserView,
+                      !browserView.isHidden
+                else { return nil }
+                return WebContentsResizeCoordinator.Target(
+                    view: browserView,
+                    frame: frameForSubview(browserView))
+            }
+            resizeCoordinator.updateTargets(
+                targets,
+                viewportHost: viewportHost,
+                containerBounds: bounds)
         }
 
         /// Round (and clip to) the layer so the hosted CEF subviews are masked
@@ -220,18 +212,28 @@ struct WebContainerView: NSViewRepresentable {
             layoutViewport()
         }
 
+        override func viewWillStartLiveResize() {
+            super.viewWillStartLiveResize()
+            resizeCoordinator.liveResizeDidStart(
+                viewportHost: viewportHost, containerBounds: bounds)
+            synchronizeBrowserGeometry()
+        }
+
+        override func viewDidEndLiveResize() {
+            super.viewDidEndLiveResize()
+            resizeCoordinator.liveResizeDidEnd()
+            synchronizeBrowserGeometry()
+        }
+
         private func layoutViewport() {
             if resizeCoordinator.isHoldingGeometry {
                 resizeCoordinator.containerDidResize(
                     viewportHost: viewportHost, containerBounds: bounds)
-                return
+            } else {
+                viewportHost.frame = bounds
+                viewportHost.bounds = NSRect(origin: .zero, size: bounds.size)
             }
-            guard !freezeSubviewLayout else { return }
-
-            viewportHost.frame = bounds
-            for subview in browserSubviews where !subview.isHidden {
-                subview.frame = frameForSubview(subview)
-            }
+            synchronizeBrowserGeometry()
         }
     }
 }
