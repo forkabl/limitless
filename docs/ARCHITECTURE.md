@@ -44,8 +44,21 @@ Keyboard handling is shared between AppKit and Chromium web-view pre-handling:
 - `LimitlessRoot.swift` exposes Objective-C entry points for shortcut handling.
 - `limitless_browser_window.mm` forwards web-focused key events before Chromium
   consumes them.
-- Accepted shortcuts force a SwiftUI redraw pulse so state changes become
-  visible immediately under Chromium's macOS message pump.
+- The Objective-C++ bridge claims accepted shortcuts synchronously and performs
+  their Swift mutations on AppKit's main queue. SwiftUI then observes the
+  mutation in the same ordered event flow.
+
+## Chrome Geometry
+
+- `ChromeTransitionDriver.swift` owns geometry-changing chrome transitions.
+  It sends post-mutation observable notifications and runs a bounded AppKit wake
+  clock for shortcut-driven native animations and viewport settlement.
+- `WebContentsResizeCoordinator.swift` holds the live Chromium viewport at a
+  stable size while its parent layer animates, then commits the final size once.
+- Hidden `WebContents` views retain their last geometry and synchronize when
+  selected instead of resizing during every chrome transition.
+- SwiftUI owns settled layout state and native-only micro-interactions. The
+  transition driver does not force redraws or resize Chromium every frame.
 
 ## Feature Boundaries
 

@@ -138,8 +138,17 @@ final class ExtensionStore: ObservableObject {
     }
 
     private func refreshSidePanel() {
-        sidePanelExtensionID = LimitlessChromeExtensions.sidePanelExtensionId()
-        sidePanelTitle = LimitlessChromeExtensions.sidePanelTitle()
+        let nextID = LimitlessChromeExtensions.sidePanelExtensionId()
+        let nextTitle = LimitlessChromeExtensions.sidePanelTitle()
+        guard nextID != sidePanelExtensionID || nextTitle != sidePanelTitle else { return }
+
+        ChromeTransitionDriver.shared.perform(kind: .extensionPanel,
+                                              anchor: .leading,
+                                              animation: Motion.reveal,
+                                              fallbackDuration: 0.25) {
+            sidePanelExtensionID = nextID
+            sidePanelTitle = nextTitle
+        }
     }
 
     /// Pinned, currently-enabled extensions (own omnibox icons), sorted by name.

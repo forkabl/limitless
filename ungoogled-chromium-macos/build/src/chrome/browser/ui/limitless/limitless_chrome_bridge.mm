@@ -67,7 +67,8 @@
 + (NSViewController*)makeRootViewController;
 + (void)prepareForTermination;
 + (BOOL)shouldAutoFocusWebContent;
-+ (BOOL)handleShortcutEvent:(NSEvent*)event;
++ (BOOL)canHandleShortcutEvent:(NSEvent*)event;
++ (void)performShortcutEvent:(NSEvent*)event;
 + (BOOL)isReservedShortcutKeyEquivalent:(NSString*)keyEquivalent
                            modifierMask:(NSUInteger)modifierMask;
 + (void)newTab;
@@ -503,6 +504,31 @@ id NSObjectFromValue(const base::Value& value) {
   return [NSNull null];
 }
 
+// RenderFrameHost may discard an outstanding script callback when a page
+// navigates or closes. Always complete the Swift continuation in that case so
+// periodic page integrations cannot accumulate suspended tasks.
+class JavaScriptResultCompletion {
+ public:
+  explicit JavaScriptResultCompletion(
+      LimitlessJavaScriptResultHandler handler)
+      : handler_([handler copy]) {}
+
+  ~JavaScriptResultCompletion() {
+    Complete(nil, @"Page changed before script evaluation completed");
+  }
+
+  void Complete(id result, NSString* error_message) {
+    LimitlessJavaScriptResultHandler handler = handler_;
+    handler_ = nil;
+    if (handler) {
+      handler(result, error_message);
+    }
+  }
+
+ private:
+  LimitlessJavaScriptResultHandler handler_;
+};
+
 }  // namespace
 
 // Engine-facing surface of LimitlessBrowserView (called from the C++ observers).
@@ -544,6 +570,22 @@ id NSObjectFromValue(const base::Value& value) {
 // Per-view WebContents observer → delegate events
 
 namespace limitless {
+
+bool RouteChromeShortcut(NSEvent* event) {
+  if (!event || ![LimitlessRoot canHandleShortcutEvent:event]) {
+    return false;
+  }
+
+  NSEvent* event_copy = [event copy];
+  // Claim the key synchronously, then cross into AppKit's main dispatch queue
+  // before mutating SwiftUI state. Posting back to Chromium's task sequence can
+  // leave SwiftUI's transaction pending until another AppKit lifecycle event
+  // (such as changing applications) wakes the view graph.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [LimitlessRoot performShortcutEvent:event_copy];
+  });
+  return true;
+}
 
 class TabBridge : public content::WebContentsObserver,
                   public find_in_page::FindResultObserver,
@@ -745,6 +787,10 @@ class LimitlessTabStripBridge : public TabStripModelObserver {
       return;
     }
     startup_blank_ = nullptr;
+    // Keep the retiring startup WebContents in the teardown registry until its
+    // asynchronous renderer close acknowledgement destroys it. It has no
+    // LimitlessBrowserView, so ViewMap cannot protect this lifetime.
+    RegisterOrphanWebContents("limitless-retired://startup", blank);
     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce([](content::WebContents* contents) {
           if (!g_limitless_browser) {
@@ -898,8 +944,7 @@ void EnsureLimitlessUIStarted(Browser* browser) {
                                        // other shortcut, so they behave
                                        // identically whether chrome or web
                                        // content has focus.
-                                       if ([LimitlessRoot
-                                               handleShortcutEvent:event]) {
+                                       if (limitless::RouteChromeShortcut(event)) {
                                          return nil;
                                        }
                                        if (LimitlessBrowserView* view =
@@ -986,6 +1031,10 @@ Browser* LimitlessBrowser() {
   return g_limitless_browser;
 }
 
+void PrepareLimitlessBrowserForDestruction(Browser* browser) {
+  DetachLimitlessWebContentsDelegates(browser);
+}
+
 }  // namespace limitless
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1082,16 @@ Browser* LimitlessBrowser() {
 - (void)layout {
   [super layout];
   [self maybeCreateTab];
+}
+
+- (void)commitViewportLayout {
+  self.needsLayout = YES;
+  [self layoutSubtreeIfNeeded];
+  if (_webView) {
+    _webView.frame = self.bounds;
+    _webView.needsLayout = YES;
+    [_webView layoutSubtreeIfNeeded];
+  }
 }
 
 // Creates (or adopts) the engine tab once the view lives in a window - the
@@ -1521,12 +1580,16 @@ Browser* LimitlessBrowser() {
   if (!frame) {
     return NO;
   }
-  LimitlessJavaScriptResultHandler handler = [completion copy];
+  auto result_completion =
+      std::make_shared<JavaScriptResultCompletion>(completion);
   frame->ExecuteJavaScriptForTests(
       base::SysNSStringToUTF16(source),
-      base::BindOnce(^(base::Value value) {
-        handler(NSObjectFromValue(value), nil);
-      }),
+      base::BindOnce(
+          [](std::shared_ptr<JavaScriptResultCompletion> result_completion,
+             base::Value value) {
+            result_completion->Complete(NSObjectFromValue(value), nil);
+          },
+          std::move(result_completion)),
       worldID);
   return YES;
 }

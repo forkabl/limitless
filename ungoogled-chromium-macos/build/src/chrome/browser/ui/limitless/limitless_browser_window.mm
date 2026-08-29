@@ -9,6 +9,7 @@
 #include "base/strings/sys_string_conversions.h"
 #include "chrome/browser/share/share_attempt.h"
 #include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
 #include "chrome/browser/ui/autofill/autofill_bubble_handler.h"
 #include "chrome/browser/ui/autofill/save_address_bubble_controller.h"
 #include "chrome/browser/ui/autofill/update_address_bubble_controller.h"
@@ -24,11 +25,8 @@
 #include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/gfx/range/range.h"
 
-// Swift-exported surface of LimitlessRoot (see LimitlessRoot.swift); declared locally so
-// this window can route web-content key events through the same shortcut
-// registry the app-level NSEvent monitor uses, without pulling in the bridge.
+// Swift-exported surface of LimitlessRoot (see LimitlessRoot.swift).
 @interface LimitlessRoot : NSObject
-+ (BOOL)handleShortcutEvent:(NSEvent*)event;
 + (void)toggleBookmarkForURL:(NSString*)url title:(NSString*)title;
 + (void)shareURL:(NSString*)url title:(NSString*)title;
 + (void)showQRCodeForURL:(NSString*)url title:(NSString*)title;
@@ -57,7 +55,7 @@ bool HandleLimitlessShortcut(const input::NativeWebKeyboardEvent& event) {
   if (!ns_event || ns_event.type != NSEventTypeKeyDown) {
     return false;
   }
-  return [LimitlessRoot handleShortcutEvent:ns_event] == YES;
+  return limitless::RouteChromeShortcut(ns_event);
 }
 
 NSString* OriginDisclosureLabel(const url::Origin& origin) {
@@ -1065,19 +1063,26 @@ void LimitlessBrowserWindow::Show() {
 }
 
 void LimitlessBrowserWindow::Close() {
-  // The BrowserView/WebUIBrowserWindow close protocol, minus the OS window:
-  // beforeunload gets a veto, then tabs close (TabStripEmpty() re-enters
-  // Close()), and an empty browser is destroyed synchronously.
+  // Match BrowserView's close protocol: let Browser own tab shutdown and
+  // asynchronous deletion. HandleBeforeClose() may pause here while a page
+  // runs beforeunload, then re-enter Close() once that work is complete.
   if (!browser_->HandleBeforeClose()) {
     return;
   }
-  browser_->OnWindowClosing();
-  if (!browser_->tab_strip_model()->empty()) {
-    browser_->tab_strip_model()->CloseAllTabs();
-    return;
+
+  // OnWindowClosing() closes a non-empty tab strip and TabStripEmpty()
+  // re-enters this method. Tear down BrowserWindowFeatures only on that final
+  // pass, before Browser schedules its asynchronous destruction task.
+  if (browser_->tab_strip_model()->empty() && !features_torn_down_) {
+    features_torn_down_ = true;
+    // LimitlessBrowserView retains native WebContents until SwiftUI releases
+    // its tab models. Clear their Browser delegate before the Browser-owned
+    // controllers are destroyed so late renderer close acknowledgements no-op.
+    limitless::PrepareLimitlessBrowserForDestruction(browser_);
+    browser_->GetFeatures().TearDownPreBrowserWindowDestruction();
   }
-  browser_->SynchronouslyDestroyBrowser();
-  // `this` is deleted.
+
+  browser_->OnWindowClosing();
 }
 
 bool LimitlessBrowserWindow::IsActive() const {

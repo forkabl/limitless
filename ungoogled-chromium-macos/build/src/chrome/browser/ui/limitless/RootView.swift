@@ -4,6 +4,7 @@ import SwiftUI
 /// content, and optional side panels.
 struct RootView: View {
     @ObservedObject var store: BrowserStore
+    @ObservedObject private var chromeTransitions = ChromeTransitionDriver.shared
     @ObservedObject private var settings = BrowserSettings.shared
     @ObservedObject private var extensionStore = ExtensionStore.shared
     @Environment(\.colorScheme) private var systemScheme
@@ -31,6 +32,7 @@ struct RootView: View {
     }
 
     var body: some View {
+        let _ = chromeTransitions.activeTransition
         let activeTab = store.selectedTab ?? store.tabs.first
 
         HStack(spacing: 0) {
@@ -151,9 +153,6 @@ struct RootView: View {
             .ignoresSafeArea()
         }
         .ignoresSafeArea()
-        .animation(Motion.reveal, value: store.aiPanelVisible)
-        .animation(Motion.snappy, value: store.sidebarVisible)
-        .animation(Motion.snappy, value: settings.sidebarPosition)
     }
 
     private func sidebarSlot(onLeft: Bool) -> some View {
@@ -358,7 +357,10 @@ private struct ActiveWebContent: View {
     let cornerRadius: CGFloat
 
     var body: some View {
-        WebContainerView(store: store, activeTab: tab, cornerRadius: cornerRadius)
+        WebContainerView(store: store,
+                         activeTab: tab,
+                         chromeTransitions: store.chromeTransitions,
+                         cornerRadius: cornerRadius)
 
         if tab.didFail {
             ErrorOverlay(tab: tab)

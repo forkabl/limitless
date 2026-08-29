@@ -21,8 +21,13 @@ void EnsureLimitlessUIStarted(Browser* browser);
 
 // The Browser instance the Limitless UI drives (null before startup).
 Browser* LimitlessBrowser();
+void PrepareLimitlessBrowserForDestruction(Browser* browser);
 
 #ifdef __OBJC__
+// Claims an NSEvent synchronously and schedules its Swift action on AppKit's
+// main queue. Returns false when the event belongs to Chromium or the page.
+bool RouteChromeShortcut(NSEvent* event);
+
 // The shared Limitless main window (used for GetNativeWindow / dialog parenting).
 NSWindow* LimitlessMainWindow();
 #endif

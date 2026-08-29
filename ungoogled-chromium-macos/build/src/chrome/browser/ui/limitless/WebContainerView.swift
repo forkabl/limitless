@@ -6,6 +6,7 @@ import AppKit
 struct WebContainerView: NSViewRepresentable {
     @ObservedObject var store: BrowserStore
     @ObservedObject var activeTab: BrowserTab
+    @ObservedObject var chromeTransitions: ChromeTransitionDriver
     /// Corner radius applied to the container's layer so the live CEF content is
     /// clipped to the rounded "card" - SwiftUI `.clipShape` can't clip a hosted
     /// AppKit view, so the rounding has to happen on the layer itself.
@@ -21,13 +22,13 @@ struct WebContainerView: NSViewRepresentable {
         let activeLoadFailed = activeTab.didFail
         nsView.applyCornerRadius(cornerRadius)
 
-        // While the sidebar is being resized, freeze the CEF subviews so the
-        // expensive async engine resize doesn't run every drag frame (the
-        // source of the lag/flicker). On release this flips false and the
-        // frame sync below resizes the engine once.
-        let wasFrozen = nsView.freezeSubviewLayout
-        nsView.freezeSubviewLayout = store.isResizingSidebar
-        let justUnfroze = wasFrozen && !store.isResizingSidebar
+        // Geometry-changing chrome holds Chromium at a stable native size and
+        // animates its parent layer. Split view changes its pane frames rather
+        // than the root viewport, so it is coordinated separately below.
+        let rootTransition = chromeTransitions.activeTransition?.kind == .splitView
+            ? nil : chromeTransitions.activeTransition
+        let geometryReleased = nsView.updateGeometryTransition(
+            rootTransition, manualResize: store.isResizingSidebar)
 
         // Settings - and an agent thread - render as a full page over the web
         // card, so hide Chromium while either is up. The launcher is hosted in
@@ -44,7 +45,7 @@ struct WebContainerView: NSViewRepresentable {
         let liveViews = realizedTabs.map { $0.browserView }
 
         // Remove views whose tabs are gone.
-        for sub in nsView.subviews where !(liveViews.contains { $0 === sub }) {
+        for sub in nsView.browserSubviews where !(liveViews.contains { $0 === sub }) {
             sub.removeFromSuperview()
         }
 
@@ -64,18 +65,22 @@ struct WebContainerView: NSViewRepresentable {
         // Add, position, and set visibility for current tabs.
         for tab in realizedTabs {
             let view = tab.browserView
-            if view.superview !== nsView {
+            if view.superview !== nsView.viewportHost {
                 view.removeFromSuperview()
-                nsView.addSubview(view)
+                nsView.addBrowserSubview(view)
             }
-            // Hold the engine's frame steady while resizing; sync it otherwise
-            // (and force a one-shot sync on the frame we just unfroze).
-            if !nsView.freezeSubviewLayout || justUnfroze {
-                view.frame = nsView.frameForSubview(view)
-            }
-            view.autoresizingMask = nsView.splitLayout == nil ? [.width, .height] : []
             let visible = tab.id == store.selectedTabID || (splitID != nil && tab.id == splitID)
             let hidden = !visible || tab.didFail
+            // Hidden WebContents retain their last size. A tab synchronizes
+            // lazily when it becomes visible, and visible tabs synchronize once
+            // when a transition ends.
+            if visible && (!nsView.holdsGeometry || geometryReleased || view.frame.isEmpty) {
+                view.frame = nsView.frameForSubview(view)
+                if geometryReleased {
+                    view.commitViewportLayout()
+                }
+            }
+            view.autoresizingMask = []
             view.isHidden = hidden
             view.setWebWindowVisible(!hidden)
             // Drive Chromium's page-visibility so backgrounded tabs throttle and
@@ -116,13 +121,24 @@ struct WebContainerView: NSViewRepresentable {
     final class ContainerView: NSView {
         override var isFlipped: Bool { true }
 
+        final class ViewportHost: NSView {
+            override var isFlipped: Bool { true }
+        }
+
+        let viewportHost = ViewportHost()
+        private let resizeCoordinator = WebContentsResizeCoordinator()
+
         /// When true, the hosted CEF subviews keep their current frame instead
         /// of tracking `bounds` - set during a sidebar resize drag so the engine
         /// isn't re-laid-out every frame. Also gates AppKit's mask-based
         /// autoresizing so a parent frame change can't resize them behind us.
-        var freezeSubviewLayout = false {
-            didSet { autoresizesSubviews = !freezeSubviewLayout }
+        private var freezeSubviewLayout = false
+
+        var holdsGeometry: Bool {
+            freezeSubviewLayout || resizeCoordinator.isHoldingGeometry
         }
+
+        var browserSubviews: [NSView] { viewportHost.subviews }
 
         /// Non-nil while a vertical split is active: the two panes, each laid
         /// out as half of the container with a thin gap between them.
@@ -132,17 +148,56 @@ struct WebContainerView: NSViewRepresentable {
 
         static let splitGap: CGFloat = 8
 
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            configureViewportHost()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            configureViewportHost()
+        }
+
+        private func configureViewportHost() {
+            viewportHost.frame = bounds
+            viewportHost.autoresizingMask = []
+            viewportHost.autoresizesSubviews = false
+            addSubview(viewportHost)
+        }
+
+        func addBrowserSubview(_ view: NSView) {
+            viewportHost.addSubview(view)
+        }
+
+        /// Returns true when held geometry was released and visible views need
+        /// one final engine resize.
+        func updateGeometryTransition(_ transition: ActiveChromeTransition?,
+                                      manualResize: Bool) -> Bool {
+            let wasManuallyFrozen = freezeSubviewLayout
+            freezeSubviewLayout = manualResize
+
+            var released = resizeCoordinator.update(
+                transition: transition,
+                viewportHost: viewportHost,
+                containerBounds: bounds)
+            if wasManuallyFrozen && !manualResize {
+                layoutViewport()
+                released = true
+            }
+            return released
+        }
+
         func frameForSubview(_ view: NSView) -> NSRect {
-            guard let split = splitLayout else { return bounds }
-            let half = (bounds.width - Self.splitGap) / 2
+            guard let split = splitLayout else { return viewportHost.bounds }
+            let half = (viewportHost.bounds.width - Self.splitGap) / 2
             if view === split.left {
-                return NSRect(x: 0, y: 0, width: half, height: bounds.height)
+                return NSRect(x: 0, y: 0, width: half, height: viewportHost.bounds.height)
             }
             if view === split.right {
                 return NSRect(x: half + Self.splitGap, y: 0,
-                              width: half, height: bounds.height)
+                              width: half, height: viewportHost.bounds.height)
             }
-            return bounds
+            return viewportHost.bounds
         }
 
         /// Round (and clip to) the layer so the hosted CEF subviews are masked
@@ -157,13 +212,26 @@ struct WebContainerView: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            guard !freezeSubviewLayout else { return }
-            for sub in subviews { sub.frame = frameForSubview(sub) }
+            layoutViewport()
         }
+
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
+            layoutViewport()
+        }
+
+        private func layoutViewport() {
+            if resizeCoordinator.isHoldingGeometry {
+                resizeCoordinator.containerDidResize(
+                    viewportHost: viewportHost, containerBounds: bounds)
+                return
+            }
             guard !freezeSubviewLayout else { return }
-            for sub in subviews { sub.frame = frameForSubview(sub) }
+
+            viewportHost.frame = bounds
+            for subview in browserSubviews where !subview.isHidden {
+                subview.frame = frameForSubview(subview)
+            }
         }
     }
 }
